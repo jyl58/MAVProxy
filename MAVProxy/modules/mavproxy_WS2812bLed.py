@@ -22,7 +22,7 @@ class WS2812bLed(mp_module.MPModule):
 		self.vehicle_status="empty"
 		self.last_status_update=time.time()
 		self.led_status_light=False
-		self.status_led_color={'empty':(0,0,0),'ACTIVE':"green",'STANDBY':"blue",'CRITICAL':"yellow"}
+		self.status_led_color={'empty':(0,0,0),'ACTIVE':"green",'STANDBY':"blue",'CRITICAL':"orange"}
 		
 	def mavlink_packet(self, m):
 		'''handle mavlink packets'''
