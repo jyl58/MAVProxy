@@ -14,6 +14,7 @@ import re
 from pymavlink import mavutil, mavparm
 from MAVProxy.modules.lib import mp_util
 from MAVProxy.modules.lib import mp_module
+from MAVProxy.modules.lib import multiproc
 
 class FirmwareModule(mp_module.MPModule):
 
@@ -172,7 +173,7 @@ fw download releasetype=OFFICIAL frame=quad platform=PX4-v2
     def filtered_rows_from_args(self, args):
         '''extracts filters from args, rows from manifests, returns filtered rows'''
         if len(self.manifests) == 0:
-            print("fw: No manifests downloaded.  Try 'manifest download'")
+            print("fw: No manifests downloaded.  Try 'fw manifest download'")
             return None
 
         (filters,remainder) = self.filters_from_args(args)
@@ -194,7 +195,6 @@ fw download releasetype=OFFICIAL frame=quad platform=PX4-v2
 
     def cmd_fw_download(self, args):
         '''cmd handler for downloading firmware'''
-        import multiprocessing
         stuff = self.filtered_rows_from_args(args)
         if stuff is None:
             return
@@ -214,7 +214,7 @@ fw download releasetype=OFFICIAL frame=quad platform=PX4-v2
             filename=os.path.basename(url)
             files = []
             files.append((url,filename))
-            child = multiprocessing.Process(target=mp_util.download_files, args=(files,))
+            child = multiproc.Process(target=mp_util.download_files, args=(files,))
             child.start()
         except Exception as e:
             print("fw: download failed")
@@ -296,7 +296,7 @@ fw download releasetype=OFFICIAL frame=quad platform=PX4-v2
         self.manifests = []
         for manifest_path in self.find_manifests():
             if self.manifest_path_is_old(manifest_path):
-                print("fw: Manifest (%s) is old; consider 'manifest download'" % (manifest_path))
+                print("fw: Manifest (%s) is old; consider 'fw manifest download'" % (manifest_path))
             manifest = self.manifest_parse(manifest_path)
             if self.semver_major(manifest["format-version"]) != 1:
                 print("fw: Manifest (%s) has major version %d; MAVProxy only understands version 1" % (manifest_path,manifest["format-version"]))
@@ -329,14 +329,13 @@ fw download releasetype=OFFICIAL frame=quad platform=PX4-v2
 
     def manifest_download(self):
         '''download manifest files'''
-        import multiprocessing
         if self.downloaders_lock.acquire(False):
             if len(self.downloaders):
                 # there already exist downloader threads
                 self.downloaders_lock.release()
                 return
 
-            for url in ['http://firmware.ardupilot.org/manifest.json']:
+            for url in ['https://firmware.ardupilot.org/manifest.json']:
                 filename = self.make_safe_filename_from_url(url)
                 path = mp_util.dot_mavproxy("manifest-%s" % filename)
                 self.downloaders[url] = threading.Thread(target=self.download_url, args=(url, path))

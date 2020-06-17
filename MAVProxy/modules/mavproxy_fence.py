@@ -11,7 +11,7 @@ if mp_util.has_wxpython:
 class FenceModule(mp_module.MPModule):
     def __init__(self, mpstate):
         super(FenceModule, self).__init__(mpstate, "fence", "geo-fence management", public = True)
-        self.fenceloader = mavwp.MAVFenceLoader()
+        self.fenceloader_by_sysid = {}
         self.last_fence_breach = 0
         self.last_fence_status = 0
         self.present = False
@@ -24,7 +24,7 @@ class FenceModule(mp_module.MPModule):
 
         self.have_list = False
 
-        if self.continue_mode and self.logdir != None:
+        if self.continue_mode and self.logdir is not None:
             fencetxt = os.path.join(self.logdir, 'fence.txt')
             if os.path.exists(fencetxt):
                 self.fenceloader.load(fencetxt)
@@ -47,14 +47,28 @@ class FenceModule(mp_module.MPModule):
                                                                                  wildcard='*.fen')),
                                          MPMenuItem('Draw', 'Draw', '# fence draw')])
 
+    @property
+    def fenceloader(self):
+        '''fence loader by sysid'''
+        if not self.target_system in self.fenceloader_by_sysid:
+            self.fenceloader_by_sysid[self.target_system] = mavwp.MAVFenceLoader()
+        return self.fenceloader_by_sysid[self.target_system]
+
     def idle_task(self):
         '''called on idle'''
-        if self.module('console') is not None and not self.menu_added_console:
-            self.menu_added_console = True
-            self.module('console').add_menu(self.menu)
-        if self.module('map') is not None and not self.menu_added_map:
-            self.menu_added_map = True
-            self.module('map').add_menu(self.menu)
+        if self.module('console') is not None:
+            if not self.menu_added_console:
+                self.menu_added_console = True
+                self.module('console').add_menu(self.menu)
+        else:
+            self.menu_added_console = False
+
+        if self.module('map') is not None:
+            if not self.menu_added_map:
+                self.menu_added_map = True
+                self.module('map').add_menu(self.menu)
+        else:
+            self.menu_added_map = False
 
     def mavlink_packet(self, m):
         '''handle and incoming mavlink packet'''
@@ -117,11 +131,7 @@ class FenceModule(mp_module.MPModule):
             print("Invalid fence point number %u" % idx)
             return
 
-        try:
-            latlon = self.module('map').click_position
-        except Exception:
-            print("No map available")
-            return
+        latlon = self.mpstate.click_location
         if latlon is None:
             print("No map click position available")
             return
@@ -291,14 +301,27 @@ class FenceModule(mp_module.MPModule):
             for i in range(self.fenceloader.count()):
                 p = self.fenceloader.point(i)
                 self.console.writeln("lat=%f lng=%f" % (p.lat, p.lng))
-        if self.status.logdir != None:
-            fencetxt = os.path.join(self.status.logdir, 'fence.txt')
+        if self.status.logdir is not None:
+            fname = 'fence.txt'
+            if self.target_system > 1:
+                fname = 'fence_%u.txt' % self.target_system
+            fencetxt = os.path.join(self.status.logdir, fname)
             self.fenceloader.save(fencetxt.strip('"'))
             print("Saved fence to %s" % fencetxt)
         self.have_list = True
 
     def print_usage(self):
         print("usage: fence <enable|disable|list|load|save|clear|draw|move|remove>")
+
+    def unload(self):
+        self.remove_command("fence")
+        if self.module('console') is not None and self.menu_added_console:
+            self.menu_added_console = False
+            self.module('console').remove_menu(self.menu)
+        if self.module('map') is not None and self.menu_added_map:
+            self.menu_added_map = False
+            self.module('map').remove_menu(self.menu)
+        super(FenceModule, self).unload()
 
 def init(mpstate):
     '''initialise module'''

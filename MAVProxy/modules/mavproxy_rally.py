@@ -14,7 +14,7 @@ if mp_util.has_wxpython:
 class RallyModule(mp_module.MPModule):
     def __init__(self, mpstate):
         super(RallyModule, self).__init__(mpstate, "rally", "rally point control", public = True)
-        self.rallyloader = mavwp.MAVRallyLoader(self.settings.target_system, self.settings.target_component)
+        self.rallyloader_by_sysid = {}
         self.add_command('rally', self.cmd_rally, "rally point control", ["<add|clear|land|list|move|remove|>",
                                     "<load|save> (FILENAME)"])
         self.have_list = False
@@ -41,15 +41,45 @@ class RallyModule(mp_module.MPModule):
                                                     handler=MPMenuCallTextDialog(title='Rally Altitude (m)',
                                                                                  default=100))])
 
+    @property
+    def rallyloader(self):
+        '''rally loader by system ID'''
+        if not self.target_system in self.rallyloader_by_sysid:
+            self.rallyloader_by_sysid[self.target_system] = mavwp.MAVRallyLoader(self.settings.target_system,
+                                                                                 self.settings.target_component)
+        return self.rallyloader_by_sysid[self.target_system]
+
+    def last_change(self):
+        '''return time of last changes made to rally points'''
+        return self.rallyloader.last_change
+
+    def rally_count(self):
+        '''return number of waypoints'''
+        return self.rallyloader.rally_count()
+
+    def rally_point(self, i):
+        '''return instance of mavutil.mavlink.MAVLink_rally_point_message'''
+        return self.rallyloader.rally_point(i)
+
+    def set_last_change(self, time):
+        '''can be used to cause map redraws'''
+        self.rallyloader.last_change = time
 
     def idle_task(self):
         '''called on idle'''
-        if self.module('console') is not None and not self.menu_added_console:
-            self.menu_added_console = True
-            self.module('console').add_menu(self.menu)
-        if self.module('map') is not None and not self.menu_added_map:
-            self.menu_added_map = True
-            self.module('map').add_menu(self.menu)
+        if self.module('console') is not None:
+            if not self.menu_added_console:
+                self.menu_added_console = True
+                self.module('console').add_menu(self.menu)
+        else:
+            self.menu_added_console = False
+
+        if self.module('map') is not None:
+            if not self.menu_added_map:
+                self.menu_added_map = True
+                self.module('map').add_menu(self.menu)
+        else:
+            self.menu_added_map = False
 
         '''handle abort command; it is critical that the AP to receive it'''
         if self.abort_ack_received is False:
@@ -98,11 +128,7 @@ class RallyModule(mp_module.MPModule):
             print("Only 5 rally points possible per flight plan.")
             return
 
-        try:
-            latlon = self.module('map').click_position
-        except Exception:
-            print("No map available")
-            return
+        latlon = self.mpstate.click_location
         if latlon is None:
             print("No map click position available")
             return
@@ -153,11 +179,7 @@ class RallyModule(mp_module.MPModule):
 
         rpoint = self.rallyloader.rally_point(idx-1)
 
-        try:
-            latlon = self.module('map').click_position
-        except Exception:
-            print("No map available")
-            return
+        latlon = self.mpstate.click_location
         if latlon is None:
             print("No map click position available")
             return
@@ -265,6 +287,16 @@ class RallyModule(mp_module.MPModule):
                 if (m.result == 0):
                     self.say("Landing.")
 
+    def unload(self):
+        self.remove_command("rally")
+        if self.module('console') is not None and self.menu_added_console:
+            self.menu_added_console = False
+            self.module('console').remove_menu(self.menu)
+        if self.module('map') is not None and self.menu_added_map:
+            self.menu_added_map = False
+            self.module('map').remove_menu(self.menu)
+        super(RallyModule, self).unload()
+
     def send_rally_point(self, i):
         '''send rally points from fenceloader'''
         p = self.rallyloader.rally_point(i)
@@ -312,8 +344,11 @@ class RallyModule(mp_module.MPModule):
             p = self.rallyloader.rally_point(i)
             self.console.writeln("lat=%f lng=%f alt=%f break_alt=%f land_dir=%f autoland=%f" % (p.lat * 1e-7, p.lng * 1e-7, p.alt, p.break_alt, p.land_dir, int(p.flags & 2!=0) ))
 
-        if self.logdir != None:
-            ral_file_path = os.path.join(self.logdir, 'ral.txt')
+        if self.logdir is not None:
+            fname = 'ral.txt'
+            if self.target_system > 1:
+                fname = 'ral_%u.txt' % self.target_system
+            ral_file_path = os.path.join(self.logdir, fname)
             self.rallyloader.save(ral_file_path)
             print("Saved rally points to %s" % ral_file_path)
 

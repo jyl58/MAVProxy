@@ -7,6 +7,7 @@ November 2013
 '''
 
 from MAVProxy.modules.lib import mp_util
+from MAVProxy.modules.lib import multiproc
 import platform
 
 class MPMenuGeneric(object):
@@ -67,11 +68,14 @@ class MPMenuItem(MPMenuGeneric):
     def id(self):
         '''id used to identify the returned menu items
         uses a 16 bit signed integer'''
-        # 0x7FFF is used as windows only allows for 16 bit IDs
-        return int(hash((self.name, self.returnkey)) & 0x7FFF)
+        # must be below SHRT_MAX
+        id = int(hash((self.name, self.returnkey))) % 32767
+        return id
 
     def _append(self, menu):
         '''append this menu item to a menu'''
+        if not self.name:
+            return
         menu.Append(self.id(), self.name, self.description)
 
     def __str__(self):
@@ -97,8 +101,11 @@ class MPMenuCheckbox(MPMenuItem):
 
     def _append(self, menu):
         '''append this menu item to a menu'''
-        menu.AppendCheckItem(self.id(), self.name, self.description)
-        menu.Check(self.id(), self.checked)
+        try:
+            menu.AppendCheckItem(self.id(), self.name, self.description)
+            menu.Check(self.id(), self.checked)
+        except Exception:
+            pass
 
     def __str__(self):
         return "MPMenuCheckbox(%s,%s,%s,%s)" % (self.name, self.description, self.returnkey, str(self.checked))
@@ -131,13 +138,13 @@ class MPMenuRadio(MPMenuItem):
 
     def _append(self, menu):
         '''append this menu item to a menu'''
-        from wx_loader import wx
+        from MAVProxy.modules.lib.wx_loader import wx
         submenu = wx.Menu()
         for i in range(len(self.items)):
             submenu.AppendRadioItem(self.id()+i, self.items[i], self.description)
             if self.items[i] == self.initial:
                 submenu.Check(self.id()+i, True)
-        menu.AppendMenu(-1, self.name, submenu)
+        menu.AppendSubMenu(submenu, self.name)
 
     def __str__(self):
         return "MPMenuRadio(%s,%s,%s,%s)" % (self.name, self.description, self.returnkey, self.get_choice())
@@ -166,6 +173,13 @@ class MPMenuSubMenu(MPMenuGeneric):
             if not updated:
                 self.items.append(m)
 
+    def remove(self, items):
+        '''remove items from a sub-menu'''
+        if not isinstance(items, list):
+            items = [items]
+        names = set([x.name for x in items])
+        self.items = list(filter(lambda x : x.name not in names, self.items))
+
     def add_to_submenu(self, submenu_path, item):
         '''add an item to a submenu using a menu path array'''
         if len(submenu_path) == 0:
@@ -184,7 +198,7 @@ class MPMenuSubMenu(MPMenuGeneric):
 
     def wx_menu(self):
         '''return a wx.Menu() for this menu'''
-        from wx_loader import wx
+        from MAVProxy.modules.lib.wx_loader import wx
         menu = wx.Menu()
         for i in range(len(self.items)):
             m = self.items[i]
@@ -201,11 +215,7 @@ class MPMenuSubMenu(MPMenuGeneric):
 
     def _append(self, menu):
         '''append this menu item to a menu'''
-        from wx_loader import wx
-        if platform.system() == 'Darwin':
-            menu.Append(-1, self.name, self.wx_menu()) #use wxPython_phoenix
-        else:
-            menu.AppendMenu(-1, self.name, self.wx_menu())
+        menu.AppendSubMenu(self.wx_menu(), self.name) #use wxPython_phoenix
 
     def __str__(self):
         return "MPMenuSubMenu(%s)" % (self.name)
@@ -229,6 +239,12 @@ class MPMenuTop(object):
             if not updated:
                 self.items.append(m)
 
+    def remove(self, items):
+        if not isinstance(items, list):
+            items = [items]
+        names = set([x.name for x in items])
+        self.items = list(filter(lambda x : x.name not in names, self.items))
+
     def add_to_submenu(self, submenu_path, item):
         '''
         add an item to a submenu using a menu path array
@@ -241,7 +257,7 @@ class MPMenuTop(object):
 
     def wx_menu(self):
         '''return a wx.MenuBar() for the menu'''
-        from wx_loader import wx
+        from MAVProxy.modules.lib.wx_loader import wx
 
         menubar = wx.MenuBar()
         for i in range(len(self.items)):
@@ -267,7 +283,7 @@ class MPMenuCallFileDialog(object):
 
     def call(self):
         '''show a file dialog'''
-        from wx_loader import wx
+        from MAVProxy.modules.lib.wx_loader import wx
 
         # remap flags to wx descriptors
         flag_map = {
@@ -294,9 +310,11 @@ class MPMenuCallTextDialog(object):
 
     def call(self):
         '''show a value dialog'''
-        from wx_loader import wx
-
-        dlg = wx.TextEntryDialog(None, self.title, self.title, defaultValue=str(self.default))
+        from MAVProxy.modules.lib.wx_loader import wx
+        try:
+            dlg = wx.TextEntryDialog(None, self.title, self.title, defaultValue=str(self.default))
+        except TypeError:
+            dlg = wx.TextEntryDialog(None, self.title, self.title, value=str(self.default))
         if dlg.ShowModal() != wx.ID_OK:
             return None
         return dlg.GetValue()
@@ -309,15 +327,14 @@ class MPMenuChildMessageDialog(object):
         self.font_size = font_size
 
     def show(self):
-        import multiprocessing
-        t = multiprocessing.Process(target=self.call)
+        t = multiproc.Process(target=self.call)
         t.start()
 
     def call(self):
         '''show the dialog as a child process'''
         mp_util.child_close_fds()
-        import wx_processguard
-        from wx_loader import wx
+        from MAVProxy.modules.lib import wx_processguard
+        from MAVProxy.modules.lib.wx_loader import wx
         from wx.lib.agw.genericmessagedialog import GenericMessageDialog
         app = wx.App(False)
         # note! font size change is not working. I don't know why yet

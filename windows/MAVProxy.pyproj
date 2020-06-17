@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
@@ -34,6 +34,7 @@
     <Content Include="MAVProxy\modules\mavproxy_map\data\blueheli.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\blueplane.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\bluerover.png" />
+    <Content Include="MAVProxy\modules\mavproxy_map\data\bluesub.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\camera-small-red.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\flag.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\greenantenna.png" />
@@ -41,6 +42,7 @@
     <Content Include="MAVProxy\modules\mavproxy_map\data\greenheli.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\greenplane.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\greenrover.png" />
+    <Content Include="MAVProxy\modules\mavproxy_map\data\greensub.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\hoop.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\loading.jpg" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\orangeplane.png" />
@@ -53,6 +55,7 @@
     <Content Include="MAVProxy\modules\mavproxy_map\data\redplane.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\redboat.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\redrover.png" />
+    <Content Include="MAVProxy\modules\mavproxy_map\data\redsub.png" />
     <Content Include="MAVProxy\modules\mavproxy_map\data\unavailable.jpg" />
     <Content Include="MAVProxy\modules\mavproxy_mmap\mmap_app\bing.js" />
     <Content Include="MAVProxy\modules\mavproxy_mmap\mmap_app\bluemarble.js" />
@@ -82,7 +85,6 @@
     <Compile Include="MAVProxy\modules\lib\mp_settings.py" />
     <Compile Include="MAVProxy\modules\lib\mp_util.py" />
     <Compile Include="MAVProxy\modules\lib\mp_widgets.py" />
-    <Compile Include="MAVProxy\modules\lib\multiprocessing_queue.py" />
     <Compile Include="MAVProxy\modules\lib\optparse_gui\__init__.py" />
     <Compile Include="MAVProxy\modules\lib\rline.py" />
     <Compile Include="MAVProxy\modules\lib\textconsole.py" />

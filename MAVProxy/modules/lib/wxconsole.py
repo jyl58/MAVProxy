@@ -4,13 +4,12 @@
   MAVProxy message console, implemented in a child process
 """
 import threading
-import textconsole, sys, time
-from wxconsole_util import Value, Text
-import platform
-if platform.system() == 'Darwin':
-    from billiard import Pipe, Process, Event, forking_enable, freeze_support
-else:
-    from multiprocessing import Pipe, Process, Event, freeze_support
+import sys, time
+
+from MAVProxy.modules.lib.wxconsole_util import Value, Text
+from MAVProxy.modules.lib import textconsole
+from MAVProxy.modules.lib import win_layout
+from MAVProxy.modules.lib import multiproc
 
 class MessageConsole(textconsole.SimpleConsole):
     '''
@@ -18,16 +17,14 @@ class MessageConsole(textconsole.SimpleConsole):
     '''
     def __init__(self,
                  title='MAVProxy: console'):
-        if platform.system() == 'Darwin':
-            forking_enable(False)
         textconsole.SimpleConsole.__init__(self)
         self.title  = title
         self.menu_callback = None
-        self.parent_pipe_recv,self.child_pipe_send = Pipe(duplex=False)
-        self.child_pipe_recv,self.parent_pipe_send = Pipe(duplex=False)
-        self.close_event = Event()
+        self.parent_pipe_recv,self.child_pipe_send = multiproc.Pipe(duplex=False)
+        self.child_pipe_recv,self.parent_pipe_send = multiproc.Pipe(duplex=False)
+        self.close_event = multiproc.Event()
         self.close_event.clear()
-        self.child = Process(target=self.child_task)
+        self.child = multiproc.Process(target=self.child_task)
         self.child.start()
         self.child_pipe_send.close()
         self.child_pipe_recv.close()
@@ -40,9 +37,9 @@ class MessageConsole(textconsole.SimpleConsole):
         self.parent_pipe_send.close()
         self.parent_pipe_recv.close()
 
-        import wx_processguard
-        from wx_loader import wx
-        from wxconsole_ui import ConsoleFrame
+        from MAVProxy.modules.lib import wx_processguard
+        from MAVProxy.modules.lib.wx_loader import wx
+        from MAVProxy.modules.lib.wxconsole_ui import ConsoleFrame
         app = wx.App(False)
         app.frame = ConsoleFrame(state=self, title=self.title)
         app.frame.SetDoubleBuffered(True)
@@ -51,16 +48,22 @@ class MessageConsole(textconsole.SimpleConsole):
 
     def watch_thread(self):
         '''watch for menu events from child'''
-        from mp_settings import MPSetting
+        from MAVProxy.modules.lib.mp_settings import MPSetting
         try:
             while True:
                 msg = self.parent_pipe_recv.recv()
-                if self.menu_callback is not None:
+                if isinstance(msg, win_layout.WinLayout):
+                    win_layout.set_layout(msg, self.set_layout)
+                elif self.menu_callback is not None:
                     self.menu_callback(msg)
                 time.sleep(0.1)
         except EOFError:
             pass
 
+    def set_layout(self, layout):
+        '''set window layout'''
+        self.parent_pipe_send.send(layout)
+        
     def write(self, text, fg='black', bg='white'):
         '''write to the console'''
         try:
@@ -90,7 +93,7 @@ class MessageConsole(textconsole.SimpleConsole):
 
 if __name__ == "__main__":
     # test the console
-    freeze_support()
+    multiproc.freeze_support()
     console = MessageConsole()
     while console.is_alive():
         console.write('Tick', fg='red')

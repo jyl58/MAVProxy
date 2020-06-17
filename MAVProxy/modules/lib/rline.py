@@ -4,6 +4,7 @@ readline handling for mavproxy
 
 import sys, glob, os, platform
 import re
+from pymavlink import mavutil
 
 rline_mpstate = None
 redisplay = None
@@ -50,12 +51,12 @@ class rline(object):
 def complete_alias(text):
     '''return list of aliases'''
     global rline_mpstate
-    return rline_mpstate.aliases.keys()
+    return list(rline_mpstate.aliases.keys())
 
 def complete_command(text):
     '''return list of commands'''
     global rline_mpstate
-    return rline_mpstate.command_map.keys()
+    return list(rline_mpstate.command_map.keys())
 
 def complete_loadedmodules(text):
     global rline_mpstate
@@ -88,19 +89,48 @@ def complete_filename(text):
 
 def complete_parameter(text):
     '''complete a parameter'''
-    return rline_mpstate.mav_param.keys()
+    return list(rline_mpstate.mav_param.keys())
 
 def complete_variable(text):
-    '''complete a MAVLink variable'''
-    if text.find('.') != -1:
-        var = text.split('.')[0]
-        if var in rline_mpstate.status.msgs:
+    '''complete a MAVLink variable or expression'''
+    if text == '':
+        return list(rline_mpstate.status.msgs.keys())
+
+    if text.endswith(":2"):
+        suffix = ":2"
+        text = text[:-2]
+    else:
+        suffix = ''
+
+    m1 = re.match("^(.*?)([A-Z0-9][A-Z0-9_]*)[.]([A-Za-z0-9_]*)$", text)
+    if m1 is not None:
+        prefix = m1.group(1)
+        mtype = m1.group(2)
+        fname = m1.group(3)
+        if mtype in rline_mpstate.status.msgs:
             ret = []
-            for f in rline_mpstate.status.msgs[var].get_fieldnames():
-                ret.append(var + '.' + f)
+            for f in rline_mpstate.status.msgs[mtype].get_fieldnames():
+                if f.startswith(fname):
+                    ret.append(prefix + mtype + '.' + f + suffix)
             return ret
         return []
-    return rline_mpstate.status.msgs.keys()
+    m2 = re.match("^(.*?)([A-Z0-9][A-Z0-9_]*)$", text)
+    prefix = m2.group(1)
+    mtype = m2.group(2)
+    ret = []
+    for k in list(rline_mpstate.status.msgs.keys()):
+        if k.startswith(mtype):
+            ret.append(prefix + k + suffix)
+    if len(ret):
+        return ret
+
+    try:
+        if mavutil.evaluate_expression(text, rline_mpstate.status.msgs) is not None:
+            return [text+suffix]
+    except Exception as ex:
+        pass
+
+    return []
 
 def rule_expand(component, text):
     '''expand one rule component'''

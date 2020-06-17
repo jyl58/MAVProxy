@@ -5,11 +5,15 @@ view a mission log on a map
 '''
 
 import sys, time, os
+import re
+
 from math import *
 
 from pymavlink import mavutil, mavwp, mavextra
 from MAVProxy.modules.mavproxy_map import mp_slipmap, mp_tile
 from MAVProxy.modules.lib import mp_util
+from MAVProxy.modules.lib import multiproc
+from MAVProxy.modules.lib import grapher
 import functools
 
 import cv2
@@ -120,7 +124,7 @@ def colourmap_for_mav_type(mav_type):
     if mav_type == mavutil.mavlink.MAV_TYPE_SUBMARINE:
         map = colour_map_submarine
     if map is None:
-        print("No colormap for mav_type=%u" % (map,))
+        print("No colormap for mav_type=%u" % (mav_type,))
         # we probably don't have a valid mode map, so returning
         # anything but the empty map here is probably pointless:
         map = colour_map_plane
@@ -131,10 +135,10 @@ def display_waypoints(wploader, map):
     mission_list = wploader.view_list()
     polygons = wploader.polygon_list()
     map.add_object(mp_slipmap.SlipClearLayer('Mission'))
-    for i in range(len(polygons)):
-        p = polygons[i]
+    for k in range(len(polygons)):
+        p = polygons[k]
         if len(p) > 1:
-            map.add_object(mp_slipmap.SlipPolygon('mission %u' % i, p,
+            map.add_object(mp_slipmap.SlipPolygon('mission %u' % k, p,
                                                   layer='Mission', linewidth=2, colour=(255,255,255)))
         labeled_wps = {}
         for i in range(len(mission_list)):
@@ -156,6 +160,8 @@ def colour_for_point(mlog, point, instance, options):
     source = getattr(options, "colour_source", "flightmode")
     if source == "flightmode":
         return colour_for_point_flightmode(mlog, point, instance, options)
+    elif source == "type":
+        return colour_for_point_type(mlog, point, instance, options)
 
     # evaluate source as an expression which should return a
     # number in the range 0..255
@@ -178,8 +184,8 @@ def colour_for_point(mlog, point, instance, options):
 #    v = mavutil.evaluate_expression(source, mlog.messages)
 
     if v is None:
-        v = 0
-    elif isinstance(v, str):
+        return v
+    if isinstance(v, str):
         print("colour expression returned a string: %s" % v)
         sys.exit(1)
     elif v < 0:
@@ -222,6 +228,11 @@ def colour_for_flightmode(mav_type, fmode, instance=0):
     colour = (r,g,b)
     return colour
 
+def colour_for_point_type(mlog, point, instance, options):
+    colors=[ 'red', 'green', 'blue', 'orange', 'olive', 'cyan', 'magenta', 'brown',
+             'violet', 'purple', 'grey', 'black']
+    return map_colours[instance]
+
 def mavflightview_mav(mlog, options=None, flightmode_selections=[]):
     '''create a map for a log file'''
     wp = mavwp.MAVWPLoader()
@@ -243,7 +254,7 @@ def mavflightview_mav(mlog, options=None, flightmode_selections=[]):
     if options.types is not None:
         types.extend(options.types.split(','))
     else:
-        types.extend(['GPS','GLOBAL_POSITION_INT'])
+        types.extend(['POS','GLOBAL_POSITION_INT'])
         if options.rawgps or options.dualgps:
             types.extend(['GPS', 'GPS_RAW_INT'])
         if options.rawgps2 or options.dualgps:
@@ -254,6 +265,15 @@ def mavflightview_mav(mlog, options=None, flightmode_selections=[]):
             types.extend(['NKF1', 'GPS'])
         if options.ahr2:
             types.extend(['AHR2', 'AHRS2', 'GPS'])
+
+    recv_match_types = types[:]
+    colour_source = getattr(options, "colour_source")
+    if colour_source is not None:
+        # stolen from mavgraph.py
+        re_caps = re.compile('[A-Z_][A-Z0-9_]+')
+        caps = set(re.findall(re_caps, colour_source))
+        recv_match_types.extend(caps)
+
     print("Looking for types %s" % str(types))
 
     last_timestamps = {}
@@ -261,7 +281,7 @@ def mavflightview_mav(mlog, options=None, flightmode_selections=[]):
 
     while True:
         try:
-            m = mlog.recv_match(type=types)
+            m = mlog.recv_match(type=recv_match_types)
             if m is None:
                 break
         except Exception:
@@ -279,25 +299,30 @@ def mavflightview_mav(mlog, options=None, flightmode_selections=[]):
                 pass
             continue
         if type == 'CMD':
-            m = mavutil.mavlink.MAVLink_mission_item_message(0,
-                                                             0,
-                                                             m.CNum,
-                                                             mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
-                                                             m.CId,
-                                                             0, 1,
-                                                             m.Prm1, m.Prm2, m.Prm3, m.Prm4,
-                                                             m.Lat, m.Lng, m.Alt)
-            try:
-                while m.seq > wp.count():
-                    print("Adding dummy WP %u" % wp.count())
-                    wp.set(m, wp.count())
-                wp.set(m, m.seq)
-            except Exception:
-                pass
+            if options.mission is None:
+                m = mavutil.mavlink.MAVLink_mission_item_message(0,
+                                                                0,
+                                                                m.CNum,
+                                                                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                                                                m.CId,
+                                                                0, 1,
+                                                                m.Prm1, m.Prm2, m.Prm3, m.Prm4,
+                                                                m.Lat, m.Lng, m.Alt)
+                try:
+                    while m.seq > wp.count():
+                        print("Adding dummy WP %u" % wp.count())
+                        wp.set(m, wp.count())
+                    wp.set(m, m.seq)
+                except Exception:
+                    pass
             continue
         if not mlog.check_condition(options.condition):
             continue
         if options.mode is not None and mlog.flightmode.lower() != options.mode.lower():
+            continue
+
+        if not type in types:
+            # may only be present for colour-source expressions to work
             continue
 
         if not all_false and len(flightmode_selections) > 0 and idx < len(options._flightmodes) and m._timestamp >= options._flightmodes[idx][2]:
@@ -306,13 +331,14 @@ def mavflightview_mav(mlog, options=None, flightmode_selections=[]):
             used_flightmodes[mlog.flightmode] = 1
             if type in ['GPS','GPS2']:
                 status = getattr(m, 'Status', None)
+                nsats = getattr(m, 'NSats', None)
                 if status is None:
                     status = getattr(m, 'FixType', None)
                     if status is None:
                         print("Can't find status on GPS message")
                         print(m)
                         break
-                if status < 2:
+                if status < 2 and nsats < 5:
                     continue
                 # flash log
                 lat = m.Lat
@@ -347,6 +373,8 @@ def mavflightview_mav(mlog, options=None, flightmode_selections=[]):
                 (lat, lng) = (m.lat*1.0e-7, m.lng*1.0e-7)
             elif type == 'ORGN':
                 (lat, lng) = (m.Lat, m.Lng)
+            elif type == 'SIM':
+                (lat, lng) = (m.Lat, m.Lng)
             else:
                 lat = m.lat * 1.0e-7
                 lng = m.lon * 1.0e-7
@@ -358,20 +386,27 @@ def mavflightview_mav(mlog, options=None, flightmode_selections=[]):
                     path.append([])
             instance = instances[type]
 
-            if abs(lat)>0.01 or abs(lng)>0.01:
-                colour = colour_for_point(mlog, (lat, lng), instance, options)
-                point = (lat, lng, colour)
+            # only plot thing we have a valid-looking location for:
+            if abs(lat)<=0.01 and abs(lng)<=0.01:
+                continue
 
-                if options.rate == 0 or not type in last_timestamps or m._timestamp - last_timestamps[type] > 1.0/options.rate:
-                    last_timestamps[type] = m._timestamp
-                    path[instance].append(point)
+            colour = colour_for_point(mlog, (lat, lng), instance, options)
+            if colour is None:
+                continue
+
+            tdays = grapher.timestamp_to_days(m._timestamp)
+            point = (lat, lng, colour, tdays)
+
+            if options.rate == 0 or not type in last_timestamps or m._timestamp - last_timestamps[type] > 1.0/options.rate:
+                last_timestamps[type] = m._timestamp
+                path[instance].append(point)
     if len(path[0]) == 0:
         print("No points to plot")
         return None
 
-    return [path, wp, fen, used_flightmodes, getattr(mlog, 'mav_type',None)]
+    return [path, wp, fen, used_flightmodes, getattr(mlog, 'mav_type',None), instances]
 
-def mavflightview_show(path, wp, fen, used_flightmodes, mav_type, options, title=None):
+def mavflightview_show(path, wp, fen, used_flightmodes, mav_type, options, instances, title=None, timelim_pipe=None):
     if not title:
         title='MAVFlightView'
 
@@ -420,7 +455,8 @@ def mavflightview_show(path, wp, fen, used_flightmodes, mav_type, options, title
                                        ground_width=ground_width,
                                        lat=lat, lon=lon,
                                        debug=options.debug,
-                                       show_flightmode_legend=options.show_flightmode_legend)
+                                       show_flightmode_legend=options.show_flightmode_legend,
+                                       timelim_pipe=timelim_pipe)
         if options.multi:
             multi_map = map
         for path_obj in path_objs:
@@ -444,6 +480,9 @@ def mavflightview_show(path, wp, fen, used_flightmodes, mav_type, options, title
             tuples = [ (mode, colour_for_flightmode(mav_type, mode))
                        for mode in used_flightmodes.keys() ]
             map.add_object(mp_slipmap.SlipFlightModeLegend("legend", tuples))
+        elif options.colour_source == "type":
+            tuples = [ (t, map_colours[instances[t]]) for t in instances.keys() ]
+            map.add_object(mp_slipmap.SlipFlightModeLegend("legend", tuples))
         else:
             print("colour-source: min=%f max=%f" % (colour_source_min, colour_source_max))
 
@@ -453,8 +492,8 @@ def mavflightview(filename, options):
     stuff = mavflightview_mav(mlog, options)
     if stuff is None:
         return
-    [path, wp, fen, used_flightmodes, mav_type] = stuff
-    mavflightview_show(path, wp, fen, used_flightmodes, mav_type, options, title=filename)
+    [path, wp, fen, used_flightmodes, mav_type, instances] = stuff
+    mavflightview_show(path, wp, fen, used_flightmodes, mav_type, options, instances, title=filename)
 
 class mavflightview_options(object):
     def __init__(self):
@@ -480,6 +519,8 @@ class mavflightview_options(object):
         self.colour_source = 'flightmode'
 
 if __name__ == "__main__":
+    multiproc.freeze_support()
+
     from optparse import OptionParser
     parser = OptionParser("mavflightview.py [options]")
     parser.add_option("--service", default="MicrosoftSat", help="tile service")

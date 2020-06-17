@@ -12,6 +12,7 @@ from math import *
 from pymavlink.mavextra import *
 import pylab
 from pymavlink import mavutil
+import threading
 
 colors = [ 'red', 'green', 'blue', 'orange', 'olive', 'black', 'grey', 'yellow', 'brown', 'darkcyan',
            'cornflowerblue', 'darkmagenta', 'deeppink', 'darkred']
@@ -38,8 +39,27 @@ flightmode_colours = [
 
 edge_colour = (0.1, 0.1, 0.1)
 
+graph_num = 1
+
+tday_base = None
+tday_basetime = None
+
+def timestamp_to_days(timestamp, timeshift=0):
+    '''convert log timestamp to days, public so that mavflightview can access'''
+    global tday_base, tday_basetime
+    if tday_base is None:
+        try:
+            tday_base = matplotlib.dates.date2num(datetime.datetime.fromtimestamp(timestamp+timeshift))
+            tday_basetime = timestamp
+        except ValueError:
+            # this can happen if the log is corrupt
+            # ValueError: year is out of range
+            return 0
+    sec_to_days = 1.0 / (60*60*24)
+    return tday_base + (timestamp - tday_basetime) * sec_to_days
+
 class MavGraph(object):
-    def __init__(self):
+    def __init__(self, flightmode_colourmap=None):
         self.lowest_x = None
         self.highest_x = None
         self.mav_list = []
@@ -57,9 +77,27 @@ class MavGraph(object):
         self.multi = False
         self.modes_plotted = {}
         self.flightmode_colour_index = 0
-        self.flightmode_colourmap = {}
+        if flightmode_colourmap:
+            self.flightmode_colourmap = flightmode_colourmap
+        else:
+            self.flightmode_colourmap = {}
+        self.flightmode_list = None
         self.ax1 = None
         self.locator = None
+        global graph_num
+        self.graph_num = graph_num
+        self.start_time = None
+        graph_num += 1
+        self.draw_events = 0
+        self.xlim_pipe = None
+        self.xlim = None
+        self.tday_base = None
+        self.tday_basetime = None
+        self.title = None
+        if sys.version_info[0] >= 3:
+            self.text_types = frozenset([str,])
+        else:
+            self.text_types = frozenset([unicode, str])
 
     def add_field(self, field):
         '''add another field to plot'''
@@ -76,6 +114,10 @@ class MavGraph(object):
     def set_xaxis(self, xaxis):
         '''set graph xaxis'''
         self.xaxis = xaxis
+
+    def set_title(self, title):
+        '''set graph title'''
+        self.title = title
 
     def set_marker(self, marker):
         '''set graph marker'''
@@ -154,13 +196,26 @@ class MavGraph(object):
     def xlim_changed(self, axsubplot):
         '''called when x limits are changed'''
         xrange = axsubplot.get_xbound()
+        xlim = axsubplot.get_xlim()
         self.setup_xrange(xrange[1] - xrange[0])
+        if self.draw_events == 0:
+            # ignore limit change before first draw event
+            return
+        if self.xlim_pipe is not None and axsubplot == self.ax1 and xlim != self.xlim:
+            self.xlim = xlim
+            #print('send', self.graph_num, xlim)
+            self.xlim_pipe[1].send(xlim)
 
-    def plotit(self, x, y, fields, colors=[]):
+    def draw_event(self, evt):
+        '''called on draw events'''
+        self.draw_events += 1
+
+    def plotit(self, x, y, fields, colors=[], title=None, interactive=True):
         '''plot a set of graphs using date for x axis'''
-        pylab.ion()
-        fig = pylab.figure(num=1, figsize=(12,6))
-        self.ax1 = fig.gca()
+        if interactive:
+            pylab.ion()
+        self.fig = pylab.figure(num=1, figsize=(12,6))
+        self.ax1 = self.fig.gca()
         ax2 = None
         for i in range(0, len(fields)):
             if len(x[i]) == 0: continue
@@ -175,13 +230,14 @@ class MavGraph(object):
             self.setup_xrange(self.highest_x - self.lowest_x)
             self.ax1.xaxis.set_major_formatter(self.formatter)
             self.ax1.callbacks.connect('xlim_changed', self.xlim_changed)
+            self.fig.canvas.mpl_connect('draw_event', self.draw_event)
         empty = True
         ax1_labels = []
         ax2_labels = []
 
         for i in range(0, len(fields)):
             if len(x[i]) == 0:
-                print("Failed to find any values for field %s" % fields[i])
+                #print("Failed to find any values for field %s" % fields[i])
                 continue
             if i < len(colors):
                 color = colors[i]
@@ -190,7 +246,7 @@ class MavGraph(object):
                 (tz, tzdst) = time.tzname
 
             if self.axes[i] == 2:
-                if ax2 == None:
+                if ax2 is None:
                     ax2 = self.ax1.twinx()
                     ax2.format_coord = self.make_format(ax2, self.ax1)
                 ax = ax2
@@ -225,26 +281,64 @@ class MavGraph(object):
                     linestyle = self.linestyle
                 else:
                     linestyle = '-'
-                ax.plot_date(x[i], y[i], color=color, label=fields[i],
-                             linestyle=linestyle, marker=marker, tz=None)
+                if len(y[i]) > 0 and type(y[i][0]) in self.text_types:
+                    # assume this is a piece of text to be rendered at a point in time
+                    last_text_time = -1
+                    last_text = None
+                    for n in range(0, len(x[i])):
+                        this_text_time = round(x[i][n], 6)
+                        this_text = y[i][n]
+                        if last_text is None:
+                            last_text = "[" + this_text + "]"
+                            last_text_time = this_text_time
+                        elif this_text_time == last_text_time:
+                            last_text += ("[" + this_text + "]")
+                        else:
+                            ax.text(last_text_time,
+                                    10,
+                                    last_text,
+                                    rotation=90,
+                                    alpha=0.6,
+                                    verticalalignment='center')
+                            last_text = this_text
+                            last_text_time = this_text_time
+                    if last_text is not None:
+                        ax.text(last_text_time,
+                                10,
+                                last_text,
+                                rotation=90,
+                                alpha=0.6,
+                                verticalalignment='center')
+                else:
+                    ax.plot_date(x[i], y[i], color=color, label=fields[i],
+                                 linestyle=linestyle, marker=marker, tz=None)
 
             empty = False
             
         if self.show_flightmode:
             alpha = 0.3
-            for i in range(len(self.modes)-1):
-                mode_name = self.modes[i][1]
+            xlim = self.ax1.get_xlim()
+            for i in range(len(self.flightmode_list)):
+                (mode_name,t0,t1) = self.flightmode_list[i]
                 c = self.flightmode_colour(mode_name)
-                self.ax1.axvspan(self.modes[i][0], self.modes[i+1][0], fc=c, ec=edge_colour, alpha=alpha)
-                self.modes_plotted[self.modes[i][1]] = (c, alpha)
-            mode_name = self.modes[-1][1]
-            c = self.flightmode_colour(mode_name)
-            self.ax1.axvspan(self.modes[-1][0], self.ax1.get_xlim()[1], fc=c, ec=edge_colour, alpha=alpha)
-            self.modes_plotted[self.modes[-1][1]] = (c, alpha)
+                tday0 = timestamp_to_days(t0, self.timeshift)
+                tday1 = timestamp_to_days(t1, self.timeshift)
+                if tday0 > xlim[1] or tday1 < xlim[0]:
+                    continue
+                tday0 = max(tday0, xlim[0])
+                tday1 = min(tday1, xlim[1])
+                self.ax1.axvspan(tday0, tday1, fc=c, ec=edge_colour, alpha=alpha)
+                self.modes_plotted[mode_name] = (c, alpha)
 
         if empty:
             print("No data to graph")
             return
+
+        if title is not None:
+            pylab.title(title)
+            self.fig.canvas.set_window_title(title)
+        else:
+            self.fig.canvas.set_window_title(fields[0])
 
         if self.show_flightmode:
             mode_patches = []
@@ -255,7 +349,7 @@ class MavGraph(object):
             labels = [patch.get_label() for patch in mode_patches]
             if ax1_labels != []:
                 patches_legend = matplotlib.pyplot.legend(mode_patches, labels, loc=self.legend_flightmode)
-                fig.gca().add_artist(patches_legend)
+                self.fig.gca().add_artist(patches_legend)
             else:
                 pylab.legend(mode_patches, labels)
 
@@ -264,24 +358,18 @@ class MavGraph(object):
         if ax2_labels != []:
             ax2.legend(ax2_labels,loc=self.legend2)
 
-
-
-    def add_data(self, t, msg, vars, flightmode):
+    def add_data(self, t, msg, vars):
         '''add some data'''
         mtype = msg.get_type()
-        if self.show_flightmode and (len(self.modes) == 0 or self.modes[-1][1] != flightmode):
-            self.modes.append((t, flightmode))
         for i in range(0, len(self.fields)):
             if mtype not in self.field_types[i]:
                 continue
             f = self.fields[i]
-            if f.endswith(":2"):
-                self.axes[i] = 2
-                f = f[:-2]
-            if f.endswith(":1"):
-                self.first_only[i] = True
-                f = f[:-2]
-            v = mavutil.evaluate_expression(f, vars)
+            simple = self.simple_field[i]
+            if simple is not None:
+                v = getattr(vars[simple[0]], simple[1])
+            else:
+                v = mavutil.evaluate_expression(f, vars)
             if v is None:
                 continue
             if self.xaxis is None:
@@ -293,8 +381,7 @@ class MavGraph(object):
             self.y[i].append(v)
             self.x[i].append(xv)
 
-
-    def process_mav(self, mlog, timeshift, flightmode_selections, _flightmodes):
+    def process_mav(self, mlog, flightmode_selections):
         '''process one file'''
         self.vars = {}
         idx = 0
@@ -303,8 +390,39 @@ class MavGraph(object):
             if s:
                 all_false = False
 
+        # pre-calc right/left axes
+        self.num_fields = len(self.fields)
+        for i in range(0, self.num_fields):
+            f = self.fields[i]
+            if f.endswith(":2"):
+                self.axes[i] = 2
+                f = f[:-2]
+            if f.endswith(":1"):
+                self.first_only[i] = True
+                f = f[:-2]
+            self.fields[i] = f
+
+        # see which fields are simple
+        self.simple_field = []
+        for i in range(0, self.num_fields):
+            f = self.fields[i]
+            m = re.match('^([A-Z][A-Z0-9_]*)[.]([A-Za-z_][A-Za-z0-9_]*)$', f)
+            if m is None:
+                self.simple_field.append(None)
+            else:
+                self.simple_field.append((m.group(1),m.group(2)))
+
+        if len(self.flightmode_list) > 0:
+            # prime the timestamp conversion
+            timestamp_to_days(self.flightmode_list[0][1], self.timeshift)
+
+        try:
+            reset_state_data()
+        except Exception:
+            pass
+
         while True:
-            msg = mlog.recv_msg()
+            msg = mlog.recv_match(type=self.msg_types)
             if msg is None:
                 break
             if msg.get_type() not in self.msg_types:
@@ -312,25 +430,48 @@ class MavGraph(object):
             if self.condition:
                 if not mavutil.evaluate_condition(self.condition, mlog.messages):
                     continue
-            try:
-                tdays = matplotlib.dates.date2num(datetime.datetime.fromtimestamp(msg._timestamp+timeshift))
-            except ValueError:
-                # this can happen if the log is corrupt
-                # ValueError: year is out of range
-                break
+            tdays = timestamp_to_days(msg._timestamp, self.timeshift)
+
             if all_false or len(flightmode_selections) == 0:
-                self.add_data(tdays, msg, mlog.messages, mlog.flightmode)
+                self.add_data(tdays, msg, mlog.messages)
             else:
-                if idx < len(_flightmodes) and msg._timestamp >= _flightmodes[idx][2]:
+                if idx < len(self.flightmode_list) and msg._timestamp >= self.flightmode_list[idx][2]:
                     idx += 1
                 elif (idx < len(flightmode_selections) and flightmode_selections[idx]):
-                    self.add_data(tdays, msg, mlog.messages, mlog.flightmode)
+                    self.add_data(tdays, msg, mlog.messages)
+
+    def xlim_change_check(self, idx):
+        '''handle xlim change requests from queue'''
+        if not self.xlim_pipe[1].poll():
+            return
+        try:
+            xlim = self.xlim_pipe[1].recv()
+            if xlim is None:
+                return
+        except Exception:
+            return
+        #print("recv: ", self.graph_num, xlim)
+        if self.ax1 is not None and xlim != self.xlim:
+            self.xlim = xlim
+            self.fig.canvas.toolbar.push_current()
+            #print("setting: ", self.graph_num, xlim)
+            self.ax1.set_xlim(xlim)
+            # trigger the timer, this allows us to setup a v slow animation,
+            # which saves a lot of CPU
+            self.ani.event_source._on_timer()
+
+    def xlim_timer(self):
+        '''called every 0.1s to check for xlim change'''
+        self.xlim_change_check(0)
+        threading.Timer(0.1, self.xlim_timer).start()
 
     def process(self, flightmode_selections, _flightmodes, block=True):
         '''process and display graph'''
         self.msg_types = set()
         self.multiplier = []
         self.field_types = []
+        self.xlim = None
+        self.flightmode_list = _flightmodes
 
         # work out msg types we are interested in
         self.x = []
@@ -352,11 +493,14 @@ class MavGraph(object):
 
         for fi in range(0, len(self.mav_list)):
             mlog = self.mav_list[fi]
-            self.process_mav(mlog, timeshift, flightmode_selections, _flightmodes)
-        
+            self.process_mav(mlog, flightmode_selections)
 
-    def show(self, lenmavlist, block=True):
+
+    def show(self, lenmavlist, block=True, xlim_pipe=None, output=None):
         '''show graph'''
+        if xlim_pipe is not None:
+            xlim_pipe[0].close()
+        self.xlim_pipe = xlim_pipe
         if self.labels is not None:
             labels = self.labels.split(',')
             if len(labels) != len(fields)*lenmavlist:
@@ -380,13 +524,32 @@ class MavGraph(object):
                 col = colors[:]
             else:
                 col = colors[fi*len(self.fields):]
-            self.plotit(self.x, self.y, lab, colors=col)
+            interactive = True
+            if output is not None:
+                interactive = False
+            self.plotit(self.x, self.y, lab, colors=col, title=self.title, interactive=interactive)
             for i in range(0, len(self.x)):
                 self.x[i] = []
                 self.y[i] = []
 
-        pylab.draw()
-        pylab.show(block=block)
+        if self.xlim_pipe is not None and output is None:
+            import matplotlib.animation
+            self.ani = matplotlib.animation.FuncAnimation(self.fig, self.xlim_change_check,
+                                                          frames=10, interval=20000,
+                                                          repeat=True, blit=False)
+            threading.Timer(0.1, self.xlim_timer).start()
+
+        if output is None:
+            pylab.draw()
+            pylab.show(block=block)
+        elif output.endswith(".html"):
+            import mpld3
+            html = mpld3.fig_to_html(self.fig)
+            f_out = open(output, 'w')
+            f_out.write(html)
+            f_out.close()
+        else:
+            pylab.savefig(output, bbox_inches='tight', dpi=200)
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
@@ -401,6 +564,7 @@ if __name__ == "__main__":
     parser.add_argument("--marker", default=None, help="point marker")
     parser.add_argument("--linestyle", default=None, help="line style")
     parser.add_argument("--xaxis", default=None, help="X axis expression")
+    parser.add_argument("--title", default=None, help="set title")
     parser.add_argument("--multi", action='store_true', help="multiple files with same colours")
     parser.add_argument("--zero-time-base", action='store_true', help="use Z time base for DF logs")
     parser.add_argument("--show-flightmode", default=True,
@@ -428,6 +592,7 @@ if __name__ == "__main__":
     mg.set_legend(args.legend)
     mg.set_legend2(args.legend2)
     mg.set_multi(args.multi)
+    mg.set_title(args.title)
     mg.set_show_flightmode(args.show_flightmode)
-    mg.process([],0)
-    mg.show(len(mg.mav_list))
+    mg.process([],[],0)
+    mg.show(len(mg.mav_list), output=args.output)

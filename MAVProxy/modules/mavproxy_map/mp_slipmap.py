@@ -16,6 +16,8 @@ import numpy as np
 from MAVProxy.modules.mavproxy_map import mp_elevation
 from MAVProxy.modules.mavproxy_map import mp_tile
 from MAVProxy.modules.lib import mp_util
+from MAVProxy.modules.lib import win_layout
+from MAVProxy.modules.lib import multiproc
 from MAVProxy.modules.mavproxy_map.mp_slipmap_util import *
 
 
@@ -37,8 +39,8 @@ class MPSlipMap():
                  brightness=0,
                  elevation=False,
                  download=True,
-                 show_flightmode_legend=True):
-        import multiprocessing
+                 show_flightmode_legend=True,
+                 timelim_pipe=None):
 
         self.lat = lat
         self.lon = lon
@@ -54,16 +56,16 @@ class MPSlipMap():
         self.oldtext = None
         self.brightness = brightness
         self.legend = show_flightmode_legend
+        self.timelim_pipe = timelim_pipe
 
         self.drag_step = 10
 
         self.title = title
-        from MAVProxy.modules.lib.multiprocessing_queue import makeIPCQueue
-        self.event_queue = makeIPCQueue()
-        self.object_queue = makeIPCQueue()
-        self.close_window = multiprocessing.Semaphore()
+        self.event_queue = multiproc.Queue()
+        self.object_queue = multiproc.Queue()
+        self.close_window = multiproc.Semaphore()
         self.close_window.acquire()
-        self.child = multiprocessing.Process(target=self.child_task)
+        self.child = multiproc.Process(target=self.child_task)
         self.child.start()
         self._callbacks = set()
 
@@ -118,23 +120,49 @@ class MPSlipMap():
         '''remove an object on the map by key'''
         self.object_queue.put(SlipRemoveObject(key))
 
+    def set_zoom(self, ground_width):
+        '''set ground width of view'''
+        self.object_queue.put(SlipZoom(ground_width))
+
+    def set_center(self, lat, lon):
+        '''set center of view'''
+        self.object_queue.put(SlipCenter((lat,lon)))
+
+    def set_follow(self, enable):
+        '''set follow on/off'''
+        self.object_queue.put(SlipFollow(enable))
+
+    def set_follow_object(self, key, enable):
+        '''set follow on/off on an object'''
+        self.object_queue.put(SlipFollowObject(key, enable))
+        
     def hide_object(self, key, hide=True):
         '''hide an object on the map by key'''
         self.object_queue.put(SlipHideObject(key, hide))
 
-    def set_position(self, key, latlon, layer=None, rotation=0):
+    def set_position(self, key, latlon, layer='', rotation=0, label=None, colour=None):
         '''move an object on the map'''
-        self.object_queue.put(SlipPosition(key, latlon, layer, rotation))
+        self.object_queue.put(SlipPosition(key, latlon, layer, rotation, label, colour))
 
     def event_count(self):
         '''return number of events waiting to be processed'''
         return self.event_queue.qsize()
 
+    def set_layout(self, layout):
+        '''set window layout'''
+        self.object_queue.put(layout)
+    
     def get_event(self):
         '''return next event or None'''
         if self.event_queue.qsize() == 0:
             return None
-        return self.event_queue.get()
+        evt = self.event_queue.get()
+        while isinstance(evt, win_layout.WinLayout):
+            win_layout.set_layout(evt, self.set_layout)
+            if self.event_queue.qsize() == 0:
+                return None
+            evt = self.event_queue.get()
+        return evt
 
     def add_callback(self, callback):
         '''add a callback for events from the map'''
@@ -152,8 +180,7 @@ class MPSlipMap():
         return mp_tile.mp_icon(filename)
 
 if __name__ == "__main__":
-    import multiprocessing
-    multiprocessing.freeze_support()
+    multiproc.freeze_support()
     import time
 
     from optparse import OptionParser

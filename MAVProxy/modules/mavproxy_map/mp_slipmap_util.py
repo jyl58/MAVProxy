@@ -12,6 +12,7 @@ import os, sys
 import time
 import cv2
 import numpy as np
+import warnings
 
 from MAVProxy.modules.mavproxy_map import mp_elevation
 from MAVProxy.modules.mavproxy_map import mp_tile
@@ -28,10 +29,11 @@ class SlipObject:
     '''an object to display on the map'''
     def __init__(self, key, layer, popup_menu=None):
         self.key = key
-        self.layer = layer
+        self.layer = str(layer)
         self.latlon = None
         self.popup_menu = popup_menu
         self.hidden = False
+        self._timestamp_range = None
 
     def clip(self, px, py, w, h, img):
         '''clip an area for display on the map'''
@@ -84,6 +86,10 @@ class SlipObject:
         '''set hidden attribute'''
         self.hidden = hidden
 
+    def set_time_range(self, trange):
+        '''set timestamp range for display'''
+        self._timestamp_range = trange
+
 class SlipLabel(SlipObject):
     '''a text label to display on the map'''
     def __init__(self, key, point, label, layer, colour):
@@ -94,7 +100,7 @@ class SlipLabel(SlipObject):
 
     def draw_label(self, img, pixmapper):
         pix1 = pixmapper(self.point)
-        cv2.putText(img, self.label, pix1, cv2.FONT_HERSHEY_SIMPLEX, 1.0, self.colour)
+        cv2.putText(img, self.label, pix1, cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.colour)
 
     def draw(self, img, pixmapper, bounds):
         if self.hidden:
@@ -183,6 +189,7 @@ class SlipPolygon(SlipObject):
         self._bounds = mp_util.polygon_bounds(self.points)
         self._pix_points = []
         self._selected_vertex = None
+        self._has_timestamps = False
 
     def bounds(self):
         '''return bounding box'''
@@ -217,12 +224,18 @@ class SlipPolygon(SlipObject):
         '''draw a polygon on the image'''
         if self.hidden:
             return
+        self._has_timestamps = len(self.points) > 0 and len(self.points[0]) > 3
         self._pix_points = []
         for i in range(len(self.points)-1):
             if len(self.points[i]) > 2:
                 colour = self.points[i][2]
             else:
                 colour = self.colour
+            if len(self.points[i]) > 3:
+                timestamp = self.points[i][3]
+                if self._timestamp_range is not None:
+                    if timestamp < self._timestamp_range[0] or timestamp > self._timestamp_range[1]:
+                        continue
             self.draw_line(img, pixmapper, self.points[i], self.points[i+1],
                            colour, self.linewidth)
 
@@ -268,7 +281,7 @@ class SlipGrid(SlipObject):
         '''draw a polygon on the image'''
         if self.hidden:
             return
-	(x,y,w,h) = bounds
+        (x,y,w,h) = bounds
         spacing = 1000
         while True:
             start = mp_util.latlon_round((x,y), spacing)
@@ -398,8 +411,8 @@ class SlipThumbnail(SlipObject):
 
         # find top left
         (w, h) = image_shape(thumb)
-        px -= w/2
-        py -= h/2
+        px -= w//2
+        py -= h//2
 
         (px, py, sx, sy, w, h) = self.clip(px, py, w, h, img)
 
@@ -407,8 +420,8 @@ class SlipThumbnail(SlipObject):
         img[py:py+h, px:px+w] = thumb_roi
 
         # remember where we placed it for clicked()
-        self.posx = px+w/2
-        self.posy = py+h/2
+        self.posx = px+w//2
+        self.posy = py+h//2
 
     def clicked(self, px, py):
         '''see if the image has been clicked on'''
@@ -449,11 +462,13 @@ class SlipTrail:
 class SlipIcon(SlipThumbnail):
     '''a icon to display on the map'''
     def __init__(self, key, latlon, img, layer=1, rotation=0,
-                 follow=False, trail=None, popup_menu=None):
+                 follow=False, trail=None, popup_menu=None, label=None, colour=(255,255,255)):
         SlipThumbnail.__init__(self, key, latlon, layer, img, popup_menu=popup_menu)
         self.rotation = rotation
         self.follow = follow
         self.trail = trail
+        self.label = label
+        self.colour = colour # label colour
 
     def img(self):
         '''return a cv image for the icon'''
@@ -461,7 +476,7 @@ class SlipIcon(SlipThumbnail):
 
         if self.rotation:
             # rotate the image
-            mat = cv2.getRotationMatrix2D((self.height/2, self.width/2), -self.rotation, 1.0)
+            mat = cv2.getRotationMatrix2D((self.height//2, self.width//2), -self.rotation, 1.0)
             self._rotated = cv2.warpAffine(self._img, mat, (self.height, self.width))
         else:
             self._rotated = self._img
@@ -481,29 +496,79 @@ class SlipIcon(SlipThumbnail):
 
         # find top left
         (w, h) = image_shape(icon)
-        px -= w/2
-        py -= h/2
+        px -= w//2
+        py -= h//2
 
         (px, py, sx, sy, w, h) = self.clip(px, py, w, h, img)
 
         img[py:py + h, px:px + w] = cv2.add(img[py:py+h, px:px+w], icon[sy:sy+h, sx:sx+w])
 
+        if self.label is not None:
+            cv2.putText(img, self.label, (px,py), cv2.FONT_HERSHEY_SIMPLEX, 1.0, self.colour)
+        
         # remember where we placed it for clicked()
-        self.posx = px+w/2
-        self.posy = py+h/2
+        self.posx = px+w//2
+        self.posy = py+h//2
 
 class SlipPosition:
     '''an position object to move an existing object on the map'''
-    def __init__(self, key, latlon, layer=None, rotation=0):
+    def __init__(self, key, latlon, layer='', rotation=0, label=None, colour=None):
         self.key = key
-        self.layer = layer
+        self.layer = str(layer)
         self.latlon = latlon
         self.rotation = rotation
+        self.label = label
+        self.colour = colour
+
+class SlipClickLocation(SlipObject):
+    '''current click location tuple'''
+    def __init__(self, location, layer='', timeout=-1):
+        self.location = location
+        self.linewidth = 2
+        self.colour = (0, 0, 255)
+        self.length = 10
+        self.layer = layer
+        self.key = "click"
+        self.timeout = timeout
+        self.start = time.time()
+
+    def draw(self, img, pixmapper, bounds):
+        '''X marks the spot'''
+        if self.location is None:
+            return
+        if self.timeout != -1 and time.time() - self.start > self.timeout:
+            return
+
+        (px,py) = pixmapper(self.location)
+
+        p1 = (px-self.length, py-self.length)
+        p2 = (px+self.length, py+self.length)
+        p3 = (px-self.length, py+self.length)
+        p4 = (px+self.length, py-self.length)
+
+        cv2.line(img, p1, p2, self.colour, self.linewidth)
+        cv2.line(img, p3, p4, self.colour, self.linewidth)
 
 class SlipCenter:
     '''an object to move the view center'''
     def __init__(self, latlon):
         self.latlon = latlon
+
+class SlipZoom:
+    '''an object to change ground width'''
+    def __init__(self, ground_width):
+        self.ground_width = ground_width
+
+class SlipFollow:
+    '''enable/disable follow'''
+    def __init__(self, enable):
+        self.enable = enable
+
+class SlipFollowObject:
+    '''enable/disable follow for an object'''
+    def __init__(self, key, enable):
+        self.key = key
+        self.enable = enable
 
 class SlipBrightness:
     '''an object to change map brightness'''
@@ -513,7 +578,7 @@ class SlipBrightness:
 class SlipClearLayer:
     '''remove all objects in a layer'''
     def __init__(self, layer):
-        self.layer = layer
+        self.layer = str(layer)
 
 class SlipRemoveObject:
     '''remove an object by key'''
@@ -557,8 +622,10 @@ class SlipInfoImage(SlipInformation):
     def img(self):
         '''return a wx image'''
         import wx
-        img = wx.EmptyImage(self.width, self.height)
-        img.SetData(self.imgstr)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            img = wx.EmptyImage(self.width, self.height)
+            img.SetData(self.imgstr)
         return img
 
     def draw(self, parent, box):
@@ -622,7 +689,7 @@ class SlipObjectSelection:
     def __init__(self, objkey, distance, layer, extra_info=None):
         self.distance = distance
         self.objkey = objkey
-        self.layer = layer
+        self.layer = str(layer)
         self.extra_info = extra_info
 
 class SlipEvent:

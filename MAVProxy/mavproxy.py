@@ -9,22 +9,42 @@ Released under the GNU GPL version 3 or later
 
 import sys, os, time, socket, signal
 import fnmatch, errno, threading
-import serial, Queue, select
+import serial, select
 import traceback
 import select
 import shlex
+import math
 import platform
 import json
+import struct
+
+try:
+    reload
+except NameError:
+    try:
+        from importlib import reload
+    except ImportError:
+        from imp import reload
+
+try:
+    import queue as Queue
+except ImportError:
+    import Queue
+
+from builtins import input
 
 from MAVProxy.modules.lib import textconsole
 from MAVProxy.modules.lib import rline
 from MAVProxy.modules.lib import mp_module
 from MAVProxy.modules.lib import dumpstacks
+from MAVProxy.modules.lib import mp_substitute
+from MAVProxy.modules.lib import multiproc
+from MAVProxy.modules.mavproxy_link import preferred_ports
 
 # adding all this allows pyinstaller to build a working windows executable
 # note that using --hidden-import does not work for these modules
 try:
-      from multiprocessing import freeze_support
+      multiproc.freeze_support()
       from pymavlink import mavwp, mavutil
       import matplotlib, HTMLParser
       try:
@@ -34,8 +54,23 @@ try:
 except Exception:
       pass
 
+# screensaver dbus syntax swiped from
+# https://stackoverflow.com/questions/10885337/inhibit-screensaver-with-python
+screensaver_interface = None
+screensaver_cookie = None
+try:
+    import atexit
+    import dbus
+    bus = dbus.SessionBus()
+    saver = bus.get_object('org.freedesktop.ScreenSaver', '/ScreenSaver')
+    screensaver_interface = dbus.Interface(saver, dbus_interface='org.freedesktop.ScreenSaver')
+    if screensaver_cookie is not None:
+        atexit.register(saver_interface.UnInhibit, [screensaver_cookie])
+except Exception as e:
+    pass
+
 if __name__ == '__main__':
-      freeze_support()
+      multiproc.freeze_support()
 
 #The MAVLink version being used (None, "1.0", "2.0")
 mavversion = None
@@ -47,6 +82,7 @@ class MPStatus(object):
         self.msgs = {}
         self.msg_count = {}
         self.counters = {'MasterIn' : [], 'MasterOut' : 0, 'FGearIn' : 0, 'FGearOut' : 0, 'Slave' : 0}
+        self.bytecounters = {'MasterIn': []}
         self.setup_mode = opts.setup
         self.mav_error = 0
         self.altitude = 0
@@ -61,6 +97,7 @@ class MPStatus(object):
         self.heartbeat_error = False
         self.last_apm_msg = None
         self.last_apm_msg_time = 0
+        self.statustexts_by_sysidcompid = {}
         self.highest_msec = 0
         self.have_gps_lock = False
         self.lost_gps_lock = False
@@ -70,8 +107,51 @@ class MPStatus(object):
         self.last_streamrate2 = -1
         self.last_seq = 0
         self.armed = False
+        self.last_bytecounter_calc = 0
 
-    def show(self, f, pattern=None):
+    class ByteCounter(object):
+        def __init__(self):
+            self.total_count = 0
+            self.current_count = 0
+            self.buckets = []
+            self.max_buckets = 10  # 10 seconds
+
+        def update(self, bytecount):
+            self.total_count += bytecount
+            self.current_count += bytecount
+
+        def rotate(self):
+            '''move current count into a bucket, zero count'''
+            # huge assumption made that we're called rapidly enough to
+            # not need to rotate multiple buckets.
+            self.buckets.append(self.current_count)
+            self.current_count = 0
+            if len(self.buckets) > self.max_buckets:
+                self.buckets = self.buckets[-self.max_buckets:]
+
+        def rate(self):
+            if len(self.buckets) == 0:
+                return 0
+            total = 0
+            for bucket in self.buckets:
+                total += bucket
+            return total/float(len(self.buckets))
+
+        def total(self):
+            return self.total_count
+
+    def update_bytecounters(self):
+        '''rotate bytecounter buckets if required'''
+        now = time.time()
+        time_delta = now - self.last_bytecounter_calc
+        if time_delta < 1:
+            return
+        self.last_bytecounter_calc = now
+
+        for counter in self.bytecounters['MasterIn']:
+            counter.rotate()
+
+    def show(self, f, pattern=None, verbose=False):
         '''write status to status.txt'''
         if pattern is None:
             f.write('Counters: ')
@@ -83,7 +163,17 @@ class MPStatus(object):
         for m in sorted(self.msgs.keys()):
             if pattern is not None and not fnmatch.fnmatch(str(m).upper(), pattern.upper()):
                 continue
-            f.write("%u: %s\n" % (self.msg_count[m], str(self.msgs[m])))
+            if verbose:
+                try:
+                    mavutil.dump_message_verbose(f, self.msgs[m])
+                    f.write("\n")
+                except AttributeError as e:
+                    if "has no attribute 'dump_message_verbose'" in str(e):
+                        print("pymavlink update required for --verbose")
+                    else:
+                        raise e
+            else:
+                f.write("%u: %s\n" % (self.msg_count[m], str(self.msgs[m])))
 
     def write(self):
         '''write status to status.txt'''
@@ -122,14 +212,16 @@ class MPState(object):
         self.console = textconsole.SimpleConsole()
         self.map = None
         self.map_functions = {}
+        self.click_location = None
+        self.click_time = None
         self.vehicle_type = None
         self.vehicle_name = None
         from MAVProxy.modules.lib.mp_settings import MPSettings, MPSetting
         self.settings = MPSettings(
             [ MPSetting('link', int, 1, 'Primary Link', tab='Link', range=(0,4), increment=1),
-              MPSetting('streamrate', int, 4, 'Stream rate link1', range=(-1,100), increment=1),
-              MPSetting('streamrate2', int, 4, 'Stream rate link2', range=(-1,100), increment=1),
-              MPSetting('heartbeat', int, 1, 'Heartbeat rate', range=(0,5), increment=1),
+              MPSetting('streamrate', int, 4, 'Stream rate link1', range=(-1,500), increment=1),
+              MPSetting('streamrate2', int, 4, 'Stream rate link2', range=(-1,500), increment=1),
+              MPSetting('heartbeat', float, 1, 'Heartbeat rate (Hz)', range=(0,100), increment=0.1),
               MPSetting('mavfwd', bool, True, 'Allow forwarded control'),
               MPSetting('mavfwd_rate', bool, False, 'Allow forwarded rate control'),
               MPSetting('shownoise', bool, True, 'Show non-MAVLink data'),
@@ -142,10 +234,13 @@ class MPState(object):
               MPSetting('distreadout', int, 200, 'Distance Readout', range=(0,10000), increment=1),
 
               MPSetting('moddebug', int, opts.moddebug, 'Module Debug Level', range=(0,3), increment=1, tab='Debug'),
+              MPSetting('script_fatal', bool, False, 'fatal error on bad script', tab='Debug'),
               MPSetting('compdebug', int, 0, 'Computation Debug Mask', range=(0,3), tab='Debug'),
               MPSetting('flushlogs', bool, False, 'Flush logs on every packet'),
               MPSetting('requireexit', bool, False, 'Require exit command'),
               MPSetting('wpupdates', bool, True, 'Announce waypoint updates'),
+              MPSetting('wpterrainadjust', bool, True, 'Adjust alt of moved wp using terrain'),
+              MPSetting('wp_use_mission_int', bool, True, 'use MISSION_ITEM_INT messages'),
 
               MPSetting('basealt', int, 0, 'Base Altitude', range=(0,30000), increment=1, tab='Altitude'),
               MPSetting('wpalt', int, 100, 'Default WP Altitude', range=(0,10000), increment=1),
@@ -165,7 +260,16 @@ class MPState(object):
               MPSetting('height_unit', str, 'm', 'height unit', choice=['m', 'feet']),
               MPSetting('speed_unit', str, 'm/s', 'height unit', choice=['m/s', 'knots', 'mph']),
 
+              MPSetting('fwdpos', bool, False, 'Forward GLOBAL_POSITION_INT on all links'),
+              MPSetting('checkdelay', bool, True, 'check for link delay'),
+              MPSetting('param_ftp', bool, True, 'try ftp for parameter download'),
+
               MPSetting('vehicle_name', str, '', 'Vehicle Name', tab='Vehicle'),
+
+              MPSetting('sys_status_error_warn_interval', int, 30, 'interval to warn of autopilot software failure'),
+
+              MPSetting('inhibit_screensaver_when_armed', bool, False, 'inhibit screensaver while vehicle armed'),
+
             ])
 
         self.completions = {
@@ -189,7 +293,8 @@ class MPState(object):
         # SITL output
         self.sitl_output = None
 
-        self.mav_param = mavparm.MAVParmDict()
+        self.mav_param_by_sysid = {}
+        self.mav_param_by_sysid[(self.settings.target_system,self.settings.target_component)] = mavparm.MAVParmDict()
         self.modules = []
         self.public_modules = {}
         self.functions = MAVFunctions()
@@ -198,6 +303,22 @@ class MPState(object):
         self.aliases = {}
         import platform
         self.system = platform.system()
+        self.multi_instance = {}
+        self.instance_count = {}
+        self.is_sitl = False
+        self.start_time_s = time.time()
+        self.attitude_time_s = 0
+
+    @property
+    def mav_param(self):
+        '''map mav_param onto the current target system parameters'''
+        compid = self.settings.target_component
+        if compid == 0:
+            compid = 1
+        sysid = (self.settings.target_system, compid)
+        if not sysid in self.mav_param_by_sysid:
+            self.mav_param_by_sysid[sysid] = mavparm.MAVParmDict()
+        return self.mav_param_by_sysid[sysid]
 
     def module(self, name):
         '''Find a public module (most modules are private)'''
@@ -220,6 +341,30 @@ class MPState(object):
                 return m
         return self.mav_master[self.settings.link-1]
 
+    def notify_click(self):
+        notify_mods = ['map', 'misseditor']
+        for modname in notify_mods:
+            mod = self.module(modname)
+            if mod is not None:
+                mod.click_updated()
+
+    def click(self, latlng):
+        if latlng is None:
+            self.click_location = None
+            self.click_time = None
+            self.notify_click()
+            return
+
+        (lat, lng) = latlng
+        if lat is None:
+            print("Bad Lat")
+            return
+        if lng is None:
+            print("Bad lng")
+            return
+        self.click_location = (lat, lng)
+        self.click_time = time.time()
+        self.notify_click()
 
 def get_mav_param(param, default=None):
     '''return a EEPROM parameter value'''
@@ -244,11 +389,15 @@ def cmd_set(args):
 
 def cmd_status(args):
     '''show status'''
+    verbose = False
+    if "--verbose" in args:
+        verbose = True
+        args = list(filter(lambda x : x != "--verbose", args))
     if len(args) == 0:
-        mpstate.status.show(sys.stdout, pattern=None)
+        mpstate.status.show(sys.stdout, pattern=None, verbose=verbose)
     else:
         for pattern in args:
-            mpstate.status.show(sys.stdout, pattern=pattern)
+            mpstate.status.show(sys.stdout, pattern=pattern, verbose=verbose)
 
 def cmd_setup(args):
     mpstate.status.setup_mode = True
@@ -259,12 +408,24 @@ def cmd_reset(args):
     print("Resetting master")
     mpstate.master().reset()
 
+def cmd_click(args):
+    '''synthesise click at lat/lon; no arguments is "unclick"'''
+    if len(args) == 0:
+        mpstate.click(None)
+        return
+    if len(args) < 2:
+        print("click LAT_EXPRESSION LNG_EXPRESSION")
+        return
+    lat = mavutil.evaluate_expression(args[0], mpstate.master().messages)
+    lng = mavutil.evaluate_expression(args[1], mpstate.master().messages)
+    mpstate.click((lat, lng))
+
 def cmd_watch(args):
     '''watch a mavlink packet pattern'''
     if len(args) == 0:
         mpstate.status.watch = None
         return
-    mpstate.status.watch = args[0]
+    mpstate.status.watch = args
     print("Watching %s" % mpstate.status.watch)
 
 def generate_kwargs(args):
@@ -285,10 +446,12 @@ def load_module(modname, quiet=False, **kwargs):
     '''load a module'''
     modpaths = ['MAVProxy.modules.mavproxy_%s' % modname, modname]
     for (m,pm) in mpstate.modules:
-        if m.name == modname:
+        if m.name == modname and not modname in mpstate.multi_instance:
             if not quiet:
                 print("module %s already loaded" % modname)
-            return False
+            # don't report an error
+            return True
+    ex = None
     for modpath in modpaths:
         try:
             m = import_package(modpath)
@@ -310,7 +473,10 @@ def load_module(modname, quiet=False, **kwargs):
             if mpstate.settings.moddebug > 1:
                 import traceback
                 print(traceback.format_exc())
-    print("Failed to load module: %s. Use 'set moddebug 3' in the MAVProxy console to enable traceback" % ex)
+    help_traceback = ""
+    if mpstate.settings.moddebug < 3:
+        help_traceback = " Use 'set moddebug 3' in the MAVProxy console to enable traceback"
+    print("Failed to load module: %s.%s" % (ex, help_traceback))
     return False
 
 def unload_module(modname):
@@ -318,8 +484,16 @@ def unload_module(modname):
     for (m,pm) in mpstate.modules:
         if m.name == modname:
             if hasattr(m, 'unload'):
-                m.unload()
+                t = threading.Thread(target=lambda : m.unload(), name="unload %s" % modname)
+                t.start()
+                t.join(timeout=5)
+                if t.is_alive():
+                    print("unload on module %s did not complete" % m.name)
+                    mpstate.modules.remove((m,pm))
+                    return False
             mpstate.modules.remove((m,pm))
+            if modname in mpstate.public_modules:
+                del mpstate.public_modules[modname]
             print("Unloaded module %s" % modname)
             return True
     print("Unable to find module %s" % modname)
@@ -332,7 +506,11 @@ def cmd_module(args):
         print(usage)
         return
     if args[0] == "list":
+        mods = []
         for (m,pm) in mpstate.modules:
+            mods.append(m)
+        mods = sorted(mods, key=lambda m : m.name)
+        for m in mods:
             print("%s: %s" % (m.name, m.description))
     elif args[0] == "load":
         if len(args) < 2:
@@ -341,7 +519,8 @@ def cmd_module(args):
         (modname, kwargs) = generate_kwargs(args[1])
         try:
             load_module(modname, **kwargs)
-        except TypeError:
+        except TypeError as ex:
+            print(ex)
             print("%s module does not support keyword arguments"% modname)
             return
     elif args[0] == "reload":
@@ -444,6 +623,7 @@ command_map = {
     'script'  : (cmd_script,   'run a script of MAVProxy commands'),
     'setup'   : (cmd_setup,    'go into setup mode'),
     'reset'   : (cmd_reset,    'reopen the connection to the MAVLink master'),
+    'click'   : (cmd_click,    'set click location'),
     'status'  : (cmd_status,   'show status'),
     'set'     : (cmd_set,      'mavproxy settings'),
     'watch'   : (cmd_watch,    'watch a MAVLink pattern'),
@@ -482,13 +662,21 @@ def process_stdin(line):
             line += '\r'
         for c in line:
             time.sleep(0.01)
-            mpstate.master().write(c)
+            if sys.version_info.major >= 3:
+                mpstate.master().write(bytes(c, "ascii"))
+            else:
+                mpstate.master().write(c)
         return
 
     if not line:
         return
 
-    args = shlex_quotes(line)
+    try:
+        args = shlex_quotes(line)
+    except Exception as e:
+        print("Caught shlex exception: %s" % e.message);
+        return
+
     cmd = args[0]
     while cmd in mpstate.aliases:
         line = mpstate.aliases[cmd]
@@ -497,7 +685,7 @@ def process_stdin(line):
 
     if cmd == 'help':
         k = command_map.keys()
-        k.sort()
+        k = sorted(k)
         for cmd in k:
             (fn, help) = command_map[cmd]
             print("%-15s : %s" % (cmd, help))
@@ -538,22 +726,27 @@ def process_master(m):
         time.sleep(0.1)
         return
 
+    mpstate.status.bytecounters['MasterIn'][m.linknum].update(len(s))
+
     if (mpstate.settings.compdebug & 1) != 0:
         return
 
     if mpstate.logqueue_raw:
-        mpstate.logqueue_raw.put(str(s))
+        mpstate.logqueue_raw.put(bytearray(s))
 
     if mpstate.status.setup_mode:
         if mpstate.system == 'Windows':
            # strip nsh ansi codes
            s = s.replace("\033[K","")
-        sys.stdout.write(str(s))
+        if sys.version_info.major >= 3:
+            sys.stdout.write(str(s, "ascii", "ignore"))
+        else:
+            sys.stdout.write(str(s))
         sys.stdout.flush()
         return
     
     global mavversion
-    if m.first_byte and mavversion == None:
+    if m.first_byte and mavversion is None:
         m.auto_mavlink_version(s)
     msgs = m.mav.parse_buffer(s)
     if msgs:
@@ -579,7 +772,7 @@ def process_mavlink(slave):
         return
     try:
         global mavversion
-        if slave.first_byte and mavversion == None:
+        if slave.first_byte and mavversion is None:
             slave.auto_mavlink_version(buf)
         msgs = slave.mav.parse_buffer(buf)
     except mavutil.mavlink.MAVError as e:
@@ -589,10 +782,16 @@ def process_mavlink(slave):
         return
     if mpstate.settings.mavfwd and not mpstate.status.setup_mode:
         for m in msgs:
-            if mpstate.status.watch is not None:
-                if fnmatch.fnmatch(m.get_type().upper(), mpstate.status.watch.upper()):
-                    mpstate.console.writeln('> '+ str(m))
-            mpstate.master().write(m.get_msgbuf())
+            mbuf = m.get_msgbuf()
+            mpstate.master().write(mbuf)
+            if mpstate.logqueue:
+                usec = int(time.time() * 1.0e6)
+                mpstate.logqueue.put(bytearray(struct.pack('>Q', usec) + m.get_msgbuf()))
+            if mpstate.status.watch:
+                for msg_type in mpstate.status.watch:
+                    if fnmatch.fnmatch(m.get_type().upper(), msg_type.upper()):
+                        mpstate.console.writeln('> '+ str(m))
+                        break
     mpstate.status.counters['Slave'] += 1
 
 
@@ -611,7 +810,7 @@ def mkdir_p(dir):
 def log_writer():
     '''log writing thread'''
     while True:
-        mpstate.logfile_raw.write(mpstate.logqueue_raw.get())
+        mpstate.logfile_raw.write(bytearray(mpstate.logqueue_raw.get()))
         timeout = time.time() + 10
         while not mpstate.logqueue_raw.empty() and time.time() < timeout:
             mpstate.logfile_raw.write(mpstate.logqueue_raw.get())
@@ -666,9 +865,9 @@ def log_paths():
 def open_telemetry_logs(logpath_telem, logpath_telem_raw):
     '''open log files'''
     if opts.append_log or opts.continue_mode:
-        mode = 'a'
+        mode = 'ab'
     else:
-        mode = 'w'
+        mode = 'wb'
 
     try:
         mpstate.logfile = open(logpath_telem, mode=mode)
@@ -710,7 +909,7 @@ def set_stream_rates():
             rate = mpstate.settings.streamrate
         else:
             rate = mpstate.settings.streamrate2
-        if rate != -1:
+        if rate != -1 and mpstate.settings.streamrate != -1:
             master.mav.request_data_stream_send(mpstate.settings.target_system, mpstate.settings.target_component,
                                                 mavutil.mavlink.MAV_DATA_STREAM_ALL,
                                                 rate, 1)
@@ -756,6 +955,8 @@ def periodic_tasks():
 
     set_stream_rates()
 
+    mpstate.status.update_bytecounters()
+
     # call optional module idle tasks. These are called at several hundred Hz
     for (m,pm) in mpstate.modules:
         if hasattr(m, 'idle_task'):
@@ -775,17 +976,34 @@ def periodic_tasks():
 
 def main_loop():
     '''main processing loop'''
+
+    global screensaver_cookie
+
     if not mpstate.status.setup_mode and not opts.nowait:
         for master in mpstate.mav_master:
+            if master.linknum != 0:
+                break
+            print("Waiting for heartbeat from %s" % master.address)
             send_heartbeat(master)
-            if master.linknum == 0:
-                print("Waiting for heartbeat from %s" % master.address)
-                master.wait_heartbeat()
+            master.wait_heartbeat(timeout=0.1)
         set_stream_rates()
 
     while True:
         if mpstate is None or mpstate.status.exit:
             return
+
+        # enable or disable screensaver:
+        if (mpstate.settings.inhibit_screensaver_when_armed and
+            screensaver_interface is not None):
+            if mpstate.status.armed and screensaver_cookie is None:
+                # now we can inhibit the screensaver
+                screensaver_cookie = screensaver_interface.Inhibit("MAVProxy",
+                                                             "Vehicle is armed")
+            elif not mpstate.status.armed and screensaver_cookie is not None:
+                # we can also restore it
+                screensaver_interface.UnInhibit(screensaver_cookie)
+                screensaver_cookie = None
+
         while not mpstate.input_queue.empty():
             line = mpstate.input_queue.get()
             mpstate.input_count += 1
@@ -868,12 +1086,10 @@ def input_loop():
     '''wait for user input'''
     while mpstate.status.exit != True:
         try:
-            if mpstate.status.exit != True:
-                line = raw_input(mpstate.rl.prompt)
-        except EOFError:
+            line = input(mpstate.rl.prompt)
+            mpstate.input_queue.put(line)
+        except (EOFError, IOError):
             mpstate.status.exit = True
-            sys.exit(1)
-        mpstate.input_queue.put(line)
 
 
 def run_script(scriptfile):
@@ -883,9 +1099,17 @@ def run_script(scriptfile):
     except Exception:
         return
     mpstate.console.writeln("Running script %s" % scriptfile)
+    sub = mp_substitute.MAVSubstitute()
     for line in f:
         line = line.strip()
         if line == "" or line.startswith('#'):
+            continue
+        try:
+            line = sub.substitute(line, os.environ)
+        except mp_substitute.MAVSubstituteError as ex:
+            print("Bad variable: %s" % str(ex))
+            if mpstate.settings.script_fatal:
+                sys.exit(1)
             continue
         if line.startswith('@'):
             line = line[1:]
@@ -915,11 +1139,9 @@ def set_mav_version(mav10, mav20, autoProtocol, mavversionArg):
     if mavversionArg == "1.0" or mav10 == True:
         os.environ['MAVLINK09'] = '1'
         mavversion = "1"
-    elif mavversionArg == "2.0" or mav20 == True:
+    else:
         os.environ['MAVLINK20'] = '1'
         mavversion = "2"
-    else:
-        mavversion = None
 
 if __name__ == '__main__':
     from optparse import OptionParser
@@ -928,6 +1150,8 @@ if __name__ == '__main__':
     parser.add_option("--master", dest="master", action='append',
                       metavar="DEVICE[,BAUD]", help="MAVLink master port and optional baud rate",
                       default=[])
+    parser.add_option("", "--force-connected", dest="force_connected", help="Use master even if initial connection fails",
+                      action='store_true', default=False)
     parser.add_option("--out", dest="output", action='append',
                       metavar="DEVICE[,BAUD]", help="MAVLink output port and optional baud rate",
                       default=[])
@@ -982,7 +1206,7 @@ if __name__ == '__main__':
     parser.add_option("--profile", action='store_true', help="run the Yappi python profiler")
     parser.add_option("--state-basedir", default=None, help="base directory for logs and aircraft directories")
     parser.add_option("--version", action='store_true', help="version information")
-    parser.add_option("--default-modules", default="log,signing,wp,rally,fence,param,relay,tuneopt,arm,mode,calibration,rc,auxopt,misc,cmdlong,battery,terrain,output,adsb", help='default module list')
+    parser.add_option("--default-modules", default="log,signing,wp,rally,fence,ftp,param,relay,tuneopt,arm,mode,calibration,rc,auxopt,misc,cmdlong,battery,terrain,output,adsb,layout", help='default module list')
 
     (opts, args) = parser.parse_args()
     if len(args) != 0:
@@ -1012,7 +1236,7 @@ if __name__ == '__main__':
 
         print("MAVProxy is a modular ground station using the mavlink protocol")
         print("MAVProxy Version: " + version)
-        sys.exit(1)
+        sys.exit(0)
 
     # global mavproxy state
     mpstate = MPState()
@@ -1029,14 +1253,14 @@ if __name__ == '__main__':
         # modules/mavutil
         load_module('speech')
 
-    serial_list = mavutil.auto_detect_serial(preferred_list=[
-          '*FTDI*',
-          "*Arduino_Mega_2560*",
-          "*3D_Robotics*",
-          "*USB_to_UART*",
-          '*Ardu*',
-          '*PX4*',
-          '*FMU*'])
+    serial_list = mavutil.auto_detect_serial(preferred_list=preferred_ports)
+    serial_list.sort(key=lambda x: x.device)
+
+    # remove OTG2 ports for dual CDC
+    if len(serial_list) == 2 and serial_list[0].device.startswith("/dev/serial/by-id"):
+        if serial_list[0].device[:-1] == serial_list[1].device[0:-1]:
+            serial_list.pop(1)
+
     if not opts.master:
         print('Auto-detected serial ports are:')
         for port in serial_list:
@@ -1061,8 +1285,8 @@ if __name__ == '__main__':
     # Listen for kill signals to cleanly shutdown modules
     fatalsignals = [signal.SIGTERM]
     try:
-        fatalsignals.append(signal.SIGHUP)
         fatalsignals.append(signal.SIGQUIT)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
     except Exception:
         pass
     if opts.daemon or opts.non_interactive: # SIGINT breaks readline parsing - if we are interactive, just let things die
@@ -1078,7 +1302,7 @@ if __name__ == '__main__':
 
     # open master link
     for mdev in opts.master:
-        if not mpstate.module('link').link_add(mdev):
+        if not mpstate.module('link').link_add(mdev, force_connected=opts.force_connected):
             sys.exit(1)
 
     if not opts.master and len(serial_list) == 1:

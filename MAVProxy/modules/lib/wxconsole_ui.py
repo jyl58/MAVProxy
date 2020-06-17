@@ -1,8 +1,9 @@
 import time
 import os
-import mp_menu
-from wxconsole_util import Value, Text
-from wx_loader import wx
+from MAVProxy.modules.lib import mp_menu
+from MAVProxy.modules.lib.wxconsole_util import Value, Text
+from MAVProxy.modules.lib.wx_loader import wx
+from MAVProxy.modules.lib import win_layout
 
 class ConsoleFrame(wx.Frame):
     """ The main frame of the console"""
@@ -11,6 +12,7 @@ class ConsoleFrame(wx.Frame):
         self.state = state
         wx.Frame.__init__(self, None, title=title, size=(800,300))
         self.panel = wx.Panel(self)
+        self.panel.SetBackgroundColour('white')
         state.frame = self
 
         # values for the status bar
@@ -18,6 +20,7 @@ class ConsoleFrame(wx.Frame):
 
         self.menu = None
         self.menu_callback = None
+        self.last_layout_send = time.time()
 
         self.control = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_AUTO_URL)
 
@@ -70,6 +73,10 @@ class ConsoleFrame(wx.Frame):
 
     def on_idle(self, event):
         time.sleep(0.05)
+        now = time.time()
+        if now - self.last_layout_send > 1:
+            self.last_layout_send = now
+            self.state.child_pipe_send.send(win_layout.get_wx_window_layout(self))
 
     def on_timer(self, event):
         state = self.state
@@ -78,7 +85,13 @@ class ConsoleFrame(wx.Frame):
             self.Destroy()
             return
         while state.child_pipe_recv.poll():
-            obj = state.child_pipe_recv.recv()
+            try:
+                obj = state.child_pipe_recv.recv()
+            except EOFError:
+                self.timer.Stop()
+                self.Destroy()
+                return
+            
             if isinstance(obj, Value):
                 # request to set a status field
                 if not obj.name in self.values:
@@ -118,3 +131,5 @@ class ConsoleFrame(wx.Frame):
                     self.Bind(wx.EVT_MENU, self.on_menu)
                 self.Refresh()
                 self.Update()
+            elif isinstance(obj, win_layout.WinLayout):
+                win_layout.set_wx_window_layout(self, obj)

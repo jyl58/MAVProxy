@@ -10,6 +10,7 @@ import sys
 import re
 import optparse
 from ..wx_loader import wx
+from MAVProxy.modules.lib import multiproc
 
 __version__ = 0.1
 __revision__ = '$Id$'
@@ -20,16 +21,17 @@ class OptparseDialog( wx.Dialog ):
     Based on the wx.Dialog sample from wx Docs & Demos'''
     def __init__(
             self,
-            option_parser, #The OptionParser object
-            parent = None,
-            ID = 0,
-            title = 'Optparse Dialog',
+            option_parser,
+            parent=None,
+            ID=0,
+            title='Optparse Dialog',
             pos=wx.DefaultPosition,
             size=wx.DefaultSize,
             style=wx.DEFAULT_DIALOG_STYLE,
-            name = 'OptparseDialog',
-        ):
+            name='OptparseDialog',
+            *args, **kwargs):
 
+        super(OptparseDialog, self).__init__(self, *args, **kwargs)
         provider = wx.SimpleHelpProvider()
         wx.HelpProvider_Set(provider)
 
@@ -95,7 +97,7 @@ class OptparseDialog( wx.Dialog ):
                 ctrl = wx.CheckBox( self, -1, option.dest, size = ( 300, -1 ) )
                 box.Add( ctrl, 0, wx.ALIGN_CENTRE|wx.ALL, 5 )
             else:
-                raise NotImplementedError ( 'Unknown option action: %s' % repr( option.action ) )
+                raise NotImplementedError ('Unknown option action: %s' % repr( option.action ) )
 
             ctrl.SetHelpText( option.help )
             sizer.Add(box, 0, wx.GROW|wx.ALIGN_CENTER_VERTICAL|wx.ALL, 5)
@@ -158,7 +160,7 @@ Args the contain spaces must be entered like so: "arg with sapce"
                                message = 'Select directory for %s' % (option.dest),
                                defaultPath = path)
         else:
-            raise NotImplementedError(`option.type`)
+            raise NotImplementedError('option.type')
         dlg_result = dlg.ShowModal()
         if wx.ID_OK != dlg_result:
             return
@@ -205,9 +207,8 @@ class OptionParser( optparse.OptionParser ):
         '''
         multiprocessing wrapper around _parse_args
         '''
-        from multiprocessing import Process, Queue
-        q = Queue()
-        p = Process(target=self._parse_args, args=(q, args, values))
+        q = multiproc.Queue()
+        p = multiproc.Process(target=self._parse_args, args=(q, args, values))
         p.start()
         ret = q.get()
         p.join()

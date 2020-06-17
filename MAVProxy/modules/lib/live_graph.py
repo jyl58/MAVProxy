@@ -8,8 +8,10 @@
   http://eli.thegreenplace.net/files/prog_code/wx_mpl_dynamic_graph.py.txt
 """
 
-from MAVProxy.modules.lib import mp_util
 import platform
+from MAVProxy.modules.lib import mp_util
+from MAVProxy.modules.lib import multiproc
+
 class LiveGraph():
     '''
     a live graph object using wx and matplotlib
@@ -25,39 +27,36 @@ class LiveGraph():
                  tickresolution=0.2,
                  colors=[ 'red', 'green', 'blue', 'orange', 'olive', 'cyan', 'magenta', 'brown',
                           'violet', 'purple', 'grey', 'black']):
-        if platform.system() == 'Darwin':
-          import billiard as multiprocessing
-        else:
-          import multiprocessing
         self.fields = fields
         self.colors = colors
         self.title  = title
         self.timespan = timespan
         self.tickresolution = tickresolution
         self.values = [None]*len(self.fields)
-        if platform.system() == 'Darwin':
-          multiprocessing.forking_enable(False)
-        self.parent_pipe,self.child_pipe = multiprocessing.Pipe()
-        self.close_graph = multiprocessing.Event()
+        self.parent_pipe,self.child_pipe = multiproc.Pipe()
+        self.close_graph = multiproc.Event()
         self.close_graph.clear()
-        self.child = multiprocessing.Process(target=self.child_task)
+        self.child = multiproc.Process(target=self.child_task)
         self.child.start()
 
     def child_task(self):
         '''child process - this holds all the GUI elements'''
         mp_util.child_close_fds()
 
-        import matplotlib
-        import wx_processguard
-        from wx_loader import wx
-        from live_graph_ui import GraphFrame
+        import matplotlib, platform
+        if platform.system() != "Darwin":
+            # on MacOS we can't set WxAgg here as it conflicts with the MacOS version
+            matplotlib.use('WXAgg')
 
-        matplotlib.use('WXAgg')
+        from MAVProxy.modules.lib import wx_processguard
+        from MAVProxy.modules.lib.wx_loader import wx
+
         app = wx.App(False)
-        app.frame = GraphFrame(state=self)
+        from MAVProxy.modules.lib import live_graph_ui
+        app.frame = live_graph_ui.GraphFrame(state=self)
         app.frame.Show()
         app.MainLoop()
-
+        
     def add_values(self, values):
         '''add some data to the graph'''
         if self.child.is_alive():
@@ -75,9 +74,11 @@ class LiveGraph():
 
 
 if __name__ == "__main__":
+    multiproc.freeze_support()
     # test the graph
     import time, math
-    livegraph = LiveGraph(['sin(t)', 'cos(t)', 'sin(t+1)',
+    import live_graph
+    livegraph = live_graph.LiveGraph(['sin(t)', 'cos(t)', 'sin(t+1)',
                            'cos(t+1)', 'sin(t+2)', 'cos(t+2)',
                            'cos(t+1)', 'sin(t+2)', 'cos(t+2)', 'x'],
                           timespan=30,
