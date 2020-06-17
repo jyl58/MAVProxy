@@ -4,7 +4,7 @@
   uses lib/console.py for display
 """
 
-import os, sys, math, time
+import os, sys, math, time, re
 
 from MAVProxy.modules.lib import wxconsole
 from MAVProxy.modules.lib import textconsole
@@ -15,21 +15,35 @@ from MAVProxy.modules.lib import mp_module
 from MAVProxy.modules.lib import wxsettings
 from MAVProxy.modules.lib.mp_menu import *
 
+class DisplayItem:
+    def __init__(self, fmt, expression, row):
+        self.expression = expression.strip('"\'')
+        self.format = fmt.strip('"\'')
+        re_caps = re.compile('[A-Z_][A-Z0-9_]+')
+        self.msg_types = set(re.findall(re_caps, expression))
+        print(self.expression, self.msg_types)
+        self.row = row
+
 class ConsoleModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(ConsoleModule, self).__init__(mpstate, "console", "GUI console", public=True)
+        super(ConsoleModule, self).__init__(mpstate, "console", "GUI console", public=True, multi_vehicle=True)
         self.in_air = False
         self.start_time = 0.0
         self.total_time = 0.0
         self.speed = 0
         self.max_link_num = 0
         self.last_sys_status_health = 0
+        self.last_sys_status_errors_announce = 0
+        self.user_added = {}
+        self.add_command('console', self.cmd_console, "console module", ['add','list','remove'])
         mpstate.console = wxconsole.MessageConsole(title='Console')
 
         # setup some default status information
         mpstate.console.set_status('Mode', 'UNKNOWN', row=0, fg='blue')
+        mpstate.console.set_status('SysID', '', row=0, fg='blue')
         mpstate.console.set_status('ARM', 'ARM', fg='grey', row=0)
         mpstate.console.set_status('GPS', 'GPS: --', fg='red', row=0)
+        mpstate.console.set_status('GPS2', '', fg='red', row=0)
         mpstate.console.set_status('Vcc', 'Vcc: --', fg='red', row=0)
         mpstate.console.set_status('Radio', 'Radio: --', row=0)
         mpstate.console.set_status('INS', 'INS', fg='grey', row=0)
@@ -55,8 +69,15 @@ class ConsoleModule(mp_module.MPModule):
         mpstate.console.set_status('AspdError', 'AspdError --', row=3)
         mpstate.console.set_status('FlightTime', 'FlightTime --', row=3)
         mpstate.console.set_status('ETR', 'ETR --', row=3)
+        mpstate.console.set_status('Params', 'Param ---/---', row=3)
 
         mpstate.console.ElevationMap = mp_elevation.ElevationModel()
+
+        self.vehicle_list = []
+        self.vehicle_menu = None
+        self.vehicle_name_by_sysid = {}
+        self.component_name = {}
+        self.last_param_sysid_timestamp = None
 
         # create the main menu
         if mp_util.has_wxpython:
@@ -64,10 +85,46 @@ class ConsoleModule(mp_module.MPModule):
             self.add_menu(MPMenuSubMenu('MAVProxy',
                                         items=[MPMenuItem('Settings', 'Settings', 'menuSettings'),
                                                MPMenuItem('Map', 'Load Map', '# module load map')]))
+            self.vehicle_menu = MPMenuSubMenu('Vehicle', items=[])
+            self.add_menu(self.vehicle_menu)
+
+    def cmd_console(self, args):
+        usage = 'usage: console <add|list|remove>'
+        if len(args) < 1:
+            print(usage)
+            return
+        cmd = args[0]
+        if cmd == 'add':
+            if len(args) < 4:
+                print("usage: console add ID FORMAT EXPRESSION <row>")
+                return
+            if len(args) > 4:
+                row = int(args[4])
+            else:
+                row = 4
+            self.user_added[args[1]] = DisplayItem(args[2], args[3], row)
+        elif cmd == 'list':
+            for k in sorted(self.user_added.keys()):
+                d = self.user_added[k]
+                print("%s : FMT=%s EXPR=%s ROW=%u" % (k, d.format, d.expression, d.row))
+        elif cmd == 'remove':
+            if len(args) < 2:
+                print("usage: console remove ID")
+                return
+            id = args[1]
+            if id in self.user_added:
+                self.user_added.pop(id)
+        else:
+            print(usage)
 
     def add_menu(self, menu):
         '''add a new menu'''
         self.menu.add(menu)
+        self.mpstate.console.set_menu(self.menu, self.menu_callback)
+
+    def remove_menu(self, menu):
+        '''add a new menu'''
+        self.menu.remove(menu)
         self.mpstate.console.set_menu(self.menu, self.menu_callback)
 
     def unload(self):
@@ -117,7 +174,66 @@ class ConsoleModule(mp_module.MPModule):
                     break
         return distance / speed
 
+    def vehicle_type_string(self, hb):
+        '''return vehicle type string from a heartbeat'''
+        if hb.type == mavutil.mavlink.MAV_TYPE_FIXED_WING:
+            return 'Plane'
+        if hb.type == mavutil.mavlink.MAV_TYPE_GROUND_ROVER:
+            return 'Rover'
+        if hb.type == mavutil.mavlink.MAV_TYPE_SURFACE_BOAT:
+            return 'Boat'
+        if hb.type == mavutil.mavlink.MAV_TYPE_SUBMARINE:
+            return 'Sub'
+        if hb.type in [mavutil.mavlink.MAV_TYPE_QUADROTOR,
+                           mavutil.mavlink.MAV_TYPE_COAXIAL,
+                           mavutil.mavlink.MAV_TYPE_HEXAROTOR,
+                           mavutil.mavlink.MAV_TYPE_OCTOROTOR,
+                           mavutil.mavlink.MAV_TYPE_TRICOPTER,
+                           mavutil.mavlink.MAV_TYPE_DODECAROTOR]:
+            return "Copter"
+        if hb.type == mavutil.mavlink.MAV_TYPE_HELICOPTER:
+            return "Heli"
+        if hb.type == mavutil.mavlink.MAV_TYPE_ANTENNA_TRACKER:
+            return "Tracker"
+        return "UNKNOWN(%u)" % hb.type
 
+    def component_type_string(self, hb):
+        # note that we rely on vehicle_type_string for basic vehicle types
+        if hb.type == mavutil.mavlink.MAV_TYPE_GCS:
+            return "GCS"
+        elif hb.type == mavutil.mavlink.MAV_TYPE_GIMBAL:
+            return "Gimbal"
+        elif hb.type == mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER:
+            return "CC"
+        elif hb.type == mavutil.mavlink.MAV_TYPE_GENERIC:
+            return "Generic"
+        return self.vehicle_type_string(hb)
+
+    def update_vehicle_menu(self):
+        '''update menu for new vehicles'''
+        self.vehicle_menu.items = []
+        for s in sorted(self.vehicle_list):
+            clist = self.module('param').get_component_id_list(s)
+            if len(clist) == 1:
+                name = 'SysID %u: %s' % (s, self.vehicle_name_by_sysid[s])
+                self.vehicle_menu.items.append(MPMenuItem(name, name, '# vehicle %u' % s))
+            else:
+                for c in sorted(clist):
+                    try:
+                        name = 'SysID %u[%u]: %s' % (s, c, self.component_name[s][c])
+                    except KeyError as e:
+                        name = 'SysID %u[%u]: ?' % (s,c)
+                    self.vehicle_menu.items.append(MPMenuItem(name, name, '# vehicle %u:%u' % (s,c)))
+        self.mpstate.console.set_menu(self.menu, self.menu_callback)
+    
+    def add_new_vehicle(self, hb):
+        '''add a new vehicle'''
+        if hb.type == mavutil.mavlink.MAV_TYPE_GCS:
+            return
+        sysid = hb.get_srcSystem()
+        self.vehicle_list.append(sysid)
+        self.vehicle_name_by_sysid[sysid] = self.vehicle_type_string(hb)
+        self.update_vehicle_menu()
 
     def mavlink_packet(self, msg):
         '''handle an incoming mavlink packet'''
@@ -128,32 +244,59 @@ class ConsoleModule(mp_module.MPModule):
             return
         type = msg.get_type()
 
+        if type == 'HEARTBEAT':
+            sysid = msg.get_srcSystem()
+            if not sysid in self.vehicle_list:
+                self.add_new_vehicle(msg)
+            if sysid not in self.component_name:
+                self.component_name[sysid] = {}
+            compid = msg.get_srcComponent()
+            if compid not in self.component_name[sysid]:
+                self.component_name[sysid][compid] = self.component_type_string(msg)
+                self.update_vehicle_menu()
+
+        if self.last_param_sysid_timestamp != self.module('param').new_sysid_timestamp:
+            '''a new component ID has appeared for parameters'''
+            self.last_param_sysid_timestamp = self.module('param').new_sysid_timestamp
+            self.update_vehicle_menu()
+
+        if type in ['RADIO', 'RADIO_STATUS']:
+            # handle RADIO msgs from all vehicles
+            if msg.rssi < msg.noise+10 or msg.remrssi < msg.remnoise+10:
+                fg = 'red'
+            else:
+                fg = 'black'
+            self.console.set_status('Radio', 'Radio %u/%u %u/%u' % (msg.rssi, msg.noise, msg.remrssi, msg.remnoise), fg=fg)
+            
+        if not self.is_primary_vehicle(msg):
+            # don't process msgs from other than primary vehicle, other than
+            # updating vehicle list
+            return
+
         master = self.master
         # add some status fields
-        if type in [ 'GPS_RAW', 'GPS_RAW_INT' ]:
-            if type == "GPS_RAW":
-                num_sats1 = master.field('GPS_STATUS', 'satellites_visible', 0)
+        if type in [ 'GPS_RAW_INT', 'GPS2_RAW' ]:
+            if type == 'GPS_RAW_INT':
+                field = 'GPS'
+                prefix = 'GPS:'
             else:
-                num_sats1 = msg.satellites_visible
-            num_sats2 = master.field('GPS2_RAW', 'satellites_visible', -1)
-            if num_sats2 == -1:
-                sats_string = "%u" % num_sats1
+                field = 'GPS2'
+                prefix = 'GPS2'
+            nsats = msg.satellites_visible
+            fix_type = msg.fix_type
+            if fix_type >= 3:
+                self.console.set_status(field, '%s OK%s (%u)' % (prefix, fix_type, nsats), fg='green')
             else:
-                sats_string = "%u/%u" % (num_sats1, num_sats2)
-            if ((msg.fix_type >= 3 and master.mavlink10()) or
-                (msg.fix_type == 2 and not master.mavlink10())):
-                if (msg.fix_type >= 4):
-                    fix_type = "%u" % msg.fix_type
+                self.console.set_status(field, '%s %u (%u)' % (prefix, fix_type, nsats), fg='red')
+            gps_heading = int(self.mpstate.status.msgs['GPS_RAW_INT'].cog * 0.01)
+            if type == 'GPS_RAW_INT':
+                vfr_hud_heading = master.field('VFR_HUD', 'heading', None)
+                if vfr_hud_heading is None:
+                    vfr_hud_heading = '---'
                 else:
-                    fix_type = ""
-                self.console.set_status('GPS', 'GPS: OK%s (%s)' % (fix_type, sats_string), fg='green')
-            else:
-                self.console.set_status('GPS', 'GPS: %u (%s)' % (msg.fix_type, sats_string), fg='red')
-            if master.mavlink10():
-                gps_heading = int(self.mpstate.status.msgs['GPS_RAW_INT'].cog * 0.01)
-            else:
-                gps_heading = self.mpstate.status.msgs['GPS_RAW'].hdg
-            self.console.set_status('Heading', 'Hdg %s/%u' % (master.field('VFR_HUD', 'heading', '-'), gps_heading))
+                    vfr_hud_heading = '%3u' % vfr_hud_heading
+                self.console.set_status('Heading', 'Hdg %s/%3u' %
+                                        (vfr_hud_heading, gps_heading))
         elif type == 'VFR_HUD':
             if master.mavlink10():
                 alt = master.field('GPS_RAW_INT', 'alt', 0) / 1.0e3
@@ -252,8 +395,23 @@ class ConsoleModule(mp_module.MPModule):
                     self.say("%s fail" % s)
             self.last_sys_status_health = msg.onboard_control_sensors_health
 
+            # check for any error bits being set:
+            now = time.time()
+            if now - self.last_sys_status_errors_announce > self.mpstate.settings.sys_status_error_warn_interval:
+                for field_num in range(1, 5):
+                    field = "errors_count%u" % field_num
+                    x = getattr(msg, field, None)
+                    if x is None:
+                        self.console.writeln("Failed to get field %s" % field)
+                        self.last_sys_status_errors_announce = now
+                        break
+                    if x != 0:
+                        self.last_sys_status_errors_announce = now
+                        self.say("Critical failure")
+                        break
+
         elif type == 'WIND':
-            self.console.set_status('Wind', 'Wind %u/%.2f' % (msg.direction, msg.speed))
+            self.console.set_status('Wind', 'Wind %u/%s' % (msg.direction, self.speed_string(msg.speed)))
 
         elif type == 'EKF_STATUS_REPORT':
             highest = 0.0
@@ -297,17 +455,13 @@ class ConsoleModule(mp_module.MPModule):
                 status += 'O2'
             self.console.set_status('PWR', status, fg=fg)
             self.console.set_status('Srv', 'Srv %.2f' % (msg.Vservo*0.001), fg='green')
-        elif type in ['RADIO', 'RADIO_STATUS']:
-            if msg.rssi < msg.noise+10 or msg.remrssi < msg.remnoise+10:
-                fg = 'red'
-            else:
-                fg = 'black'
-            self.console.set_status('Radio', 'Radio %u/%u %u/%u' % (msg.rssi, msg.noise, msg.remrssi, msg.remnoise), fg=fg)
         elif type == 'HEARTBEAT':
             fmode = master.flightmode
             if self.settings.vehicle_name:
                 fmode = self.settings.vehicle_name + ':' + fmode
             self.console.set_status('Mode', '%s' % fmode, fg='blue')
+            if len(self.vehicle_list) > 1:
+                self.console.set_status('SysID', 'Sys:%u' % msg.get_srcSystem(), fg='blue')
             if self.master.motors_armed():
                 arm_colour = 'green'
             else:
@@ -323,7 +477,10 @@ class ConsoleModule(mp_module.MPModule):
                     self.console.set_status('Link%u'%(i+1), '', row=1)
                 self.max_link_num = len(self.mpstate.mav_master)
             for m in self.mpstate.mav_master:
-                linkdelay = (self.mpstate.status.highest_msec - m.highest_msec)*1.0e-3
+                if self.mpstate.settings.checkdelay:
+                    linkdelay = (self.mpstate.status.highest_msec - m.highest_msec)*1.0e-3
+                else:
+                    linkdelay = 0
                 linkline = "Link %s " % (self.link_label(m))
                 fg = 'dark green'
                 if m.linkerror:
@@ -389,19 +546,33 @@ class ConsoleModule(mp_module.MPModule):
             self.console.set_status('WPDist', 'Distance %s' % self.dist_string(msg.wp_dist))
             self.console.set_status('WPBearing', 'Bearing %u' % msg.target_bearing)
             if msg.alt_error > 0:
-                alt_error_sign = "L"
+                alt_error_sign = "(L)"
             else:
-                alt_error_sign = "H"
+                alt_error_sign = "(H)"
             if msg.aspd_error > 0:
-                aspd_error_sign = "L"
+                aspd_error_sign = "(L)"
             else:
-                aspd_error_sign = "H"
+                aspd_error_sign = "(H)"
             if math.isnan(msg.alt_error):
                 alt_error = "NaN"
             else:
-                alt_error = "%d%s" % (msg.alt_error, alt_error_sign)
+                alt_error = "%s%s" % (self.height_string(msg.alt_error), alt_error_sign)
             self.console.set_status('AltError', 'AltError %s' % alt_error)
-            self.console.set_status('AspdError', 'AspdError %.1f%s' % (msg.aspd_error*0.01, aspd_error_sign))
+            self.console.set_status('AspdError', 'AspdError %s%s' % (self.speed_string(msg.aspd_error*0.01), aspd_error_sign))
+
+        elif type == 'PARAM_VALUE':
+            rec, tot = self.module('param').param_status()
+            self.console.set_status('Params', 'Param %u/%u' % (rec,tot))
+
+        for id in self.user_added.keys():
+            if type in self.user_added[id].msg_types:
+                d = self.user_added[id]
+                val = mavutil.evaluate_expression(d.expression, self.master.messages)
+                try:
+                    self.console.set_status(id, d.format % val, row = d.row)
+                except Exception as ex:
+                    print(ex)
+                    pass
 
 def init(mpstate):
     '''initialise module'''

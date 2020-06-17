@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 '''
 Example Module
-Peter barker, September 2016
+Peter Barker, September 2016
 
 This module simply serves as a starting point for your own MAVProxy module.
 
@@ -34,7 +34,6 @@ class example(mp_module.MPModule):
 
         self.packets_mytarget = 0
         self.packets_othertarget = 0
-        self.verbose = False
 
         self.example_settings = mp_settings.MPSettings(
             [ ('verbose', bool, False),

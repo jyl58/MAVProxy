@@ -22,6 +22,7 @@ class LogModule(mp_module.MPModule):
         self.retries = 0
         self.entries = {}
         self.download_queue = []
+        self.last_status = time.time()
 
     def mavlink_packet(self, m):
         '''handle an incoming mavlink packet'''
@@ -36,6 +37,9 @@ class LogModule(mp_module.MPModule):
             tstring = ''
         else:
             tstring = time.ctime(m.time_utc)
+        if m.num_logs == 0:
+            print("No logs")
+            return
         self.entries[m.id] = m
         print("Log %u  numLogs %u lastLog %u size %u %s" % (m.id, m.num_logs, m.last_log_num, m.size, tstring))
 
@@ -63,11 +67,12 @@ class LogModule(mp_module.MPModule):
             self.download_file.close()
             size = os.path.getsize(self.download_filename)
             speed = size / (1000.0 * dt)
-            print("Finished downloading %s (%u bytes %u seconds, %.1f kbyte/sec %u retries)" % (
-                self.download_filename,
-                size,
-                dt, speed,
-                self.retries))
+            status = "Finished downloading %s (%u bytes %u seconds, %.1f kbyte/sec %u retries)" % (self.download_filename,
+                                                                                                   size,
+                                                                                                   dt, speed,
+                                                                                                   self.retries)
+            self.console.set_status('LogDownload',status, row=4)
+            print(status)
             self.download_file = None
             self.download_filename = None
             self.download_set = set()
@@ -75,6 +80,7 @@ class LogModule(mp_module.MPModule):
                                                  self.target_component)
             if len(self.download_queue):
                 self.log_download_next()
+        self.update_status()
 
     def handle_log_data_missing(self):
         '''handling missing incoming log data'''
@@ -105,7 +111,7 @@ class LogModule(mp_module.MPModule):
                     break
 
 
-    def log_status(self):
+    def log_status(self, console=False):
         '''show download status'''
         if self.download_filename is None:
             print("No download")
@@ -117,19 +123,30 @@ class LogModule(mp_module.MPModule):
             size = 0
         else:
             size = m.size
-        highest = max(self.download_set)
+        highest = 0
+        if len(self.download_set):
+            highest = max(self.download_set)
         diff = set(range(highest)).difference(self.download_set)
-        print("Downloading %s - %u/%u bytes %.1f kbyte/s (%u retries %u missing)" % (self.download_filename,
-                                                                                     os.path.getsize(self.download_filename),
-                                                                                     size,
-                                                                                     speed,
-                                                                                     self.retries,
-                                                                                     len(diff)))
+
+        status = "Downloading %s - %u/%u bytes %.1f kbyte/s (%u retries %u missing)" % (self.download_filename,
+                                                                                        os.path.getsize(self.download_filename),
+                                                                                        size,
+                                                                                        speed,
+                                                                                        self.retries,
+                                                                                            len(diff))
+        if console:
+            self.console.set_status('LogDownload', status, row=4)
+        else:
+            print(status)
 
     def log_download_next(self):
         latest = self.download_queue.pop()
         filename = self.default_log_filename(latest)
-        self.log_download(latest, filename)
+        if os.path.isfile(filename) and os.path.getsize(filename) == self.entries.get(latest).to_dict()["size"]:
+            print("Skipping existing %s" % (filename))
+            self.log_download_next()
+        else:
+            self.log_download(latest, filename)
 
     def log_download_all(self):
         if len(self.entries.keys()) == 0:
@@ -187,7 +204,7 @@ class LogModule(mp_module.MPModule):
 
         elif args[0] == "download":
             if len(args) < 2:
-                print("usage: log download <lognumber> <filename>")
+                print("usage: log download all | log download <lognumber> <filename>")
                 return
             if args[1] == 'all':
                 self.log_download_all()
@@ -208,11 +225,19 @@ class LogModule(mp_module.MPModule):
             print(usage)
 
 
+    def update_status(self):
+        '''update log download status in console'''
+        now = time.time()
+        if self.download_file is not None and now - self.last_status > 0.5:
+            self.last_status = now
+            self.log_status(True)
+            
     def idle_task(self):
         '''handle missing log data'''
         if self.download_last_timestamp is not None and time.time() - self.download_last_timestamp > 0.7:
             self.download_last_timestamp = time.time()
             self.handle_log_data_missing()
+        self.update_status()
 
 def init(mpstate):
     '''initialise module'''

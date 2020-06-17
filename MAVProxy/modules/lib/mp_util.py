@@ -4,7 +4,9 @@
 
 import math
 import os
+import sys
 import platform
+import warnings
 
 # Some platforms (CYGWIN and others) many not have the wx library
 # use imp to see if wx is on the path
@@ -147,16 +149,20 @@ def bounds_overlap(bound1, bound2):
 class object_container:
     '''return a picklable object from an existing object,
     containing all of the normal attributes of the original'''
-    def __init__(self, object):
+    def __init__(self, object, debug=False):
         for v in dir(object):
-            if not v.startswith('__') and v not in ['this']:
+            if not v.startswith('__') and v not in ['this', 'ClassInfo', 'EventObject']:
                 try:
-                    a = getattr(object, v)
-                    if (hasattr(a, '__call__') or
-                        hasattr(a, '__swig_destroy__') or
-                        str(a).find('Swig Object') != -1):
-                        continue
-                    setattr(self, v, a)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        a = getattr(object, v)
+                        if (hasattr(a, '__call__') or
+                            hasattr(a, '__swig_destroy__') or
+                            str(a).find('Swig Object') != -1):
+                            continue
+                        if debug:
+                            print(v, a)
+                        setattr(self, v, a)
                 except Exception:
                     pass
 
@@ -219,7 +225,7 @@ def wxToPIL(wimg):
 
 def PILTowx(pimg):
     '''convert a PIL Image to a wx image'''
-    from wx_loader import wx
+    from MAVProxy.modules.lib.wx_loader import wx
     wimg = wx.EmptyImage(pimg.size[0], pimg.size[1])
     try:
         wimg.SetData(pimg.convert('RGB').tobytes())
@@ -241,11 +247,16 @@ def dot_mavproxy(name=None):
 
 def download_url(url):
     '''download a URL and return the content'''
-    import urllib2
+    if sys.version_info.major < 3:
+        from urllib2 import urlopen as url_open
+        from urllib2 import URLError as url_error
+    else:
+        from urllib.request import urlopen as url_open
+        from urllib.error import URLError as url_error
     try:
-        resp = urllib2.urlopen(url)
+        resp = url_open(url)
         headers = resp.info()
-    except urllib2.URLError as e:
+    except url_error as e:
         print('Error downloading %s' % url)
         return None
     return resp.read()
@@ -259,7 +270,7 @@ def download_files(files):
         if data is None:
             continue
         try:
-            open(file, mode='w').write(data)
+            open(file, mode='wb').write(data)
         except Exception as e:
             print("Failed to save to %s : %s" % (file, e))
 
@@ -301,3 +312,95 @@ def quaternion_to_axis_angle(q):
     if angle > math.pi:
         angle = angle - 2 * math.pi
     return Vector3(angle * b / n, angle * c / n, angle * d / n)
+
+def null_term(str):
+    '''null terminate a string for py3'''
+    if sys.version_info.major < 3:
+        return str
+    if isinstance(str, bytes):
+        str = str.decode("utf-8")
+    idx = str.find("\0")
+    if idx != -1:
+        str = str[:idx]
+    return str
+
+    
+def decode_devid(devid, pname):
+    '''decode one device ID. Used for 'devid' command in mavproxy and MAVExplorer'''
+    devid = int(devid)
+    if devid == 0:
+        return
+
+    bus_type=devid & 0x07
+    bus=(devid>>3) & 0x1F
+    address=(devid>>8)&0xFF
+    devtype=(devid>>16)
+
+    bustypes = {
+        1: "I2C",
+        2: "SPI",
+        3: "UAVCAN",
+        4: "SITL"
+        }
+
+    compass_types = {
+        0x01 : "DEVTYPE_HMC5883_OLD",
+        0x07 : "DEVTYPE_HMC5883",
+        0x02 : "DEVTYPE_LSM303D",
+        0x04 : "DEVTYPE_AK8963 ",
+        0x05 : "DEVTYPE_BMM150 ",
+        0x06 : "DEVTYPE_LSM9DS1",
+        0x08 : "DEVTYPE_LIS3MDL",
+        0x09 : "DEVTYPE_AK09916",
+        0x0A : "DEVTYPE_IST8310",
+        0x0B : "DEVTYPE_ICM20948",
+        0x0C : "DEVTYPE_MMC3416",
+        0x0D : "DEVTYPE_QMC5883L",
+        0x0E : "DEVTYPE_MAG3110",
+        0x0F : "DEVTYPE_SITL",
+        0x10 : "DEVTYPE_IST8308",
+        0x11 : "DEVTYPE_RM3100_OLD",
+        0x12 : "DEVTYPE_RM3100",
+        }
+
+    imu_types = {
+        0x09 : "DEVTYPE_BMI160",
+        0x10 : "DEVTYPE_L3G4200D",
+        0x11 : "DEVTYPE_ACC_LSM303D",
+        0x12 : "DEVTYPE_ACC_BMA180",
+        0x13 : "DEVTYPE_ACC_MPU6000",
+        0x16 : "DEVTYPE_ACC_MPU9250",
+        0x17 : "DEVTYPE_ACC_IIS328DQ",
+        0x21 : "DEVTYPE_GYR_MPU6000",
+        0x22 : "DEVTYPE_GYR_L3GD20",
+        0x24 : "DEVTYPE_GYR_MPU9250",
+        0x25 : "DEVTYPE_GYR_I3G4250D",
+        0x26 : "DEVTYPE_GYR_LSM9DS1",
+        0x27 : "DEVTYPE_INS_ICM20789",
+        0x28 : "DEVTYPE_INS_ICM20689",
+        0x29 : "DEVTYPE_INS_BMI055",
+        0x2A : "DEVTYPE_SITL",
+        0x2B : "DEVTYPE_INS_BMI088",
+        0x2C : "DEVTYPE_INS_ICM20948",
+        0x2D : "DEVTYPE_INS_ICM20648",
+        0x2E : "DEVTYPE_INS_ICM20649",
+        0x2F : "DEVTYPE_INS_ICM20602",
+        0x30 : "DEVTYPE_INS_ICM20601",
+        0x31 : "DEVTYPE_INS_ADIS1647x",
+        }
+
+    decoded_devname = ""
+
+    if pname.startswith("COMPASS"):
+        if bus_type == 3 and devtype == 1:
+            decoded_devname = "UAVCAN"
+        else:
+            decoded_devname = compass_types.get(devtype, "UNKNOWN")
+
+    if pname.startswith("INS"):
+        decoded_devname = imu_types.get(devtype, "UNKNOWN")
+
+    print("%s: bus_type:%s(%u)  bus:%u address:%u(0x%x) devtype:%u(0x%x) %s" % (
+        pname,
+        bustypes.get(bus_type,"UNKNOWN"), bus_type,
+        bus, address, address, devtype, devtype, decoded_devname))

@@ -2,7 +2,8 @@
 Graphical editing of mp_settings object
 '''
 import os, sys
-import multiprocessing, threading
+from MAVProxy.modules.lib import multiproc
+import threading
 
 class WXSettings(object):
     '''
@@ -10,10 +11,10 @@ class WXSettings(object):
     '''
     def __init__(self, settings):
         self.settings  = settings
-        self.parent_pipe,self.child_pipe = multiprocessing.Pipe()
-        self.close_event = multiprocessing.Event()
+        self.parent_pipe,self.child_pipe = multiproc.Pipe()
+        self.close_event = multiproc.Event()
         self.close_event.clear()
-        self.child = multiprocessing.Process(target=self.child_task)
+        self.child = multiproc.Process(target=self.child_task)
         self.child.start()
         t = threading.Thread(target=self.watch_thread)
         t.daemon = True
@@ -22,9 +23,9 @@ class WXSettings(object):
     def child_task(self):
         '''child process - this holds all the GUI elements'''
         from MAVProxy.modules.lib import mp_util
-        import wx_processguard
-        from wx_loader import wx
-        from wxsettings_ui import SettingsDlg
+        from MAVProxy.modules.lib import wx_processguard
+        from MAVProxy.modules.lib.wx_loader import wx
+        from MAVProxy.modules.lib.wxsettings_ui import SettingsDlg
 
         mp_util.child_close_fds()
         app = wx.App(False)
@@ -35,7 +36,7 @@ class WXSettings(object):
 
     def watch_thread(self):
         '''watch for settings changes from child'''
-        from mp_settings import MPSetting
+        from MAVProxy.modules.lib.mp_settings import MPSetting
         while True:
             setting = self.child_pipe.recv()
             if not isinstance(setting, MPSetting):
@@ -51,15 +52,15 @@ class WXSettings(object):
 
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
+    multiproc.freeze_support()
 
     def test_callback(setting):
         '''callback on apply'''
         print("Changing %s to %s" % (setting.name, setting.value))
 
     # test the settings
-    import mp_settings, time
-    from mp_settings import MPSetting
+    from MAVProxy.modules.lib import mp_settings, time
+    from MAVProxy.modules.lib.mp_settings import MPSetting
     settings = mp_settings.MPSettings(
         [ MPSetting('link', int, 1, tab='TabOne'),
           MPSetting('altreadout', int, 10, range=(-30,1017), increment=1),

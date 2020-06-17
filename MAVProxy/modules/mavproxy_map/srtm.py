@@ -6,8 +6,14 @@
 """Load and process SRTM data. Originally written by OpenStreetMap
 Edited by CanberraUAV"""
 
-from HTMLParser import HTMLParser
-import httplib
+import sys
+if sys.version_info.major < 3:
+    from HTMLParser import HTMLParser
+    import httplib
+else:
+    from html.parser import HTMLParser
+    import http.client as httplib
+
 import re
 import pickle
 import os.path
@@ -15,9 +21,8 @@ import os
 import zipfile
 import array
 import math
-import multiprocessing
 from MAVProxy.modules.lib import mp_util
-import tempfile
+from MAVProxy.modules.lib import multiproc
 
 childTileDownload = {}
 childFileListDownload = {}
@@ -69,13 +74,17 @@ class SRTMDownloader():
             try:
                 cachedir = os.path.join(os.environ['HOME'], '.tilecache/SRTM')
             except Exception:
-                cachedir = os.path.join(tempfile.gettempdir(), 'MAVProxySRTM')
+                if 'LOCALAPPDATA' in os.environ:
+                    cachedir = os.path.join(os.environ['LOCALAPPDATA'], '.tilecache/SRTM')
+                else:
+                    import tempfile
+                    cachedir = os.path.join(tempfile.gettempdir(), 'MAVProxySRTM')
 
         self.debug = debug
         self.offline = offline
         self.offlinemessageshown = 0
         if self.offline == 1 and self.debug:
-            print "Map Module in Offline mode"
+            print("Map Module in Offline mode")
         self.first_failure = False
         self.server = server
         self.directory = directory
@@ -119,7 +128,7 @@ class SRTMDownloader():
         global filelistDownloadActive
         mypid = os.getpid()
         if mypid not in childFileListDownload or not childFileListDownload[mypid].is_alive():
-            childFileListDownload[mypid] = multiprocessing.Process(target=self.createFileListHTTP)
+            childFileListDownload[mypid] = multiproc.Process(target=self.createFileListHTTP)
             filelistDownloadActive = 1
             childFileListDownload[mypid].start()
             filelistDownloadActive = 0
@@ -128,7 +137,7 @@ class SRTMDownloader():
         '''fetch a URL with redirect handling'''
         tries = 0
         while tries < 5:
-                conn = httplib.HTTPConnection(self.server)
+                conn = httplib.HTTPSConnection(self.server)
                 conn.request("GET", url)
                 r1 = conn.getresponse()
                 if r1.status in [301, 302, 303, 307]:
@@ -141,7 +150,16 @@ class SRTMDownloader():
                     continue
                 data = r1.read()
                 conn.close()
-                return data
+                if sys.version_info.major < 3:
+                    return data
+                else:
+                    encoding = r1.headers.get_content_charset()
+                    if encoding is not None:
+                        return data.decode(encoding)
+                    elif ".zip" in url or ".hgt" in url:
+                        return data
+                    else:
+                        return data.decode('utf-8')
         return None
 
     def createFileListHTTP(self):
@@ -251,7 +269,7 @@ class SRTMDownloader():
         if not os.path.exists(os.path.join(self.cachedir, filename)):
             if not mypid in childTileDownload or not childTileDownload[mypid].is_alive():
                 try:
-                    childTileDownload[mypid] = multiprocessing.Process(target=self.downloadTile, args=(str(continent), str(filename)))
+                    childTileDownload[mypid] = multiproc.Process(target=self.downloadTile, args=(str(continent), str(filename)))
                     childTileDownload[mypid].start()
                 except Exception as ex:
                     if mypid in childTileDownload:
@@ -457,13 +475,22 @@ class parseHTMLDirectoryListing(HTMLParser):
 
 #DEBUG ONLY
 if __name__ == '__main__':
-    downloader = SRTMDownloader()
+    from argparse import ArgumentParser
+    parser = ArgumentParser(description='srtm test')
+
+    parser.add_argument("--lat", type=float, default=-35.363261)
+    parser.add_argument("--lon", type=float, default=149.165230)
+    parser.add_argument("--debug", action='store_true', default=False)
+    args = parser.parse_args()
+
+    downloader = SRTMDownloader(debug=args.debug)
     downloader.loadFileList()
     import time
+    from math import floor
     start = time.time()
     while time.time() - start < 30:
-        tile = downloader.getTile(-36, 149)
+        tile = downloader.getTile(int(floor(args.lat)), int(floor(args.lon)))
         if tile:
-            print(tile.getAltitudeFromLatLon(-35.282, 149.1287))
+            print("Download took %.1fs alt=%.1f" % (time.time()-start, tile.getAltitudeFromLatLon(args.lat, args.lon)))
             break
         time.sleep(0.2)

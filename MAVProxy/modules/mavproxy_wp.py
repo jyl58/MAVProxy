@@ -15,7 +15,7 @@ class WPModule(mp_module.MPModule):
         self.wp_requested = {}
         self.wp_received = {}
         self.wp_save_filename = None
-        self.wploader = mavwp.MAVWPLoader()
+        self.wploader_by_sysid = {}
         self.loading_waypoints = False
         self.loading_waypoint_lasttime = time.time()
         self.last_waypoint = 0
@@ -23,11 +23,12 @@ class WPModule(mp_module.MPModule):
         self.undo_wp = None
         self.undo_type = None
         self.undo_wp_idx = -1
+        self.wploader.expected_count = 0
         self.add_command('wp', self.cmd_wp,       'waypoint management',
-                         ["<list|clear|move|remove|loop|set|undo|movemulti|changealt|param|status>",
-                          "<load|update|save|show> (FILENAME)"])
+                         ["<list|clear|move|remove|loop|set|undo|movemulti|changealt|param|status|slope>",
+                          "<load|update|save|savecsv|show> (FILENAME)"])
 
-        if self.continue_mode and self.logdir != None:
+        if self.continue_mode and self.logdir is not None:
             waytxt = os.path.join(mpstate.status.logdir, 'way.txt')
             if os.path.exists(waytxt):
                 self.wploader.load(waytxt)
@@ -52,8 +53,15 @@ class WPModule(mp_module.MPModule):
                                                     handler=MPMenuCallTextDialog(title='Mission Altitude (m)',
                                                                                  default=100)),
                                          MPMenuItem('Undo', 'Undo', '# wp undo'),
-                                         MPMenuItem('Loop', 'Loop', '# wp loop')])
+                                         MPMenuItem('Loop', 'Loop', '# wp loop'),
+                                         MPMenuItem('Add NoFly', 'Loop', '# wp noflyadd')])
 
+    @property
+    def wploader(self):
+        '''per-sysid wploader'''
+        if self.target_system not in self.wploader_by_sysid:
+            self.wploader_by_sysid[self.target_system] = mavwp.MAVWPLoader()
+        return self.wploader_by_sysid[self.target_system]
 
     def missing_wps_to_request(self):
         ret = []
@@ -74,9 +82,11 @@ class WPModule(mp_module.MPModule):
             wps = self.missing_wps_to_request()
         tnow = time.time()
         for seq in wps:
-            #print("REQUESTING %u/%u (%u)" % (seq, self.wploader.expected_count, i))
             self.wp_requested[seq] = tnow
-            self.master.waypoint_request_send(seq)
+            if self.settings.wp_use_mission_int:
+                self.master.mav.mission_request_int_send(self.master.target_system, self.master.target_component, seq)
+            else:
+                self.master.mav.mission_request_send(self.master.target_system, self.master.target_component, seq)
 
     def wp_status(self):
         '''show status of wp download'''
@@ -85,13 +95,52 @@ class WPModule(mp_module.MPModule):
         except Exception:
             print("Have %u waypoints" % (self.wploader.count()+len(self.wp_received)))
 
+
+    def wp_slope(self, args):
+        '''show slope of waypoints'''
+        if len(args) == 2:
+            # specific waypoints
+            wp1 = int(args[0])
+            wp2 = int(args[1])
+            w1 = self.wploader.wp(wp1)
+            w2 = self.wploader.wp(wp2)
+            delta_alt = w1.z - w2.z
+            if delta_alt == 0:
+                slope = "Level"
+            else:
+                delta_xy = mp_util.gps_distance(w1.x, w1.y, w2.x, w2.y)
+                slope = "%.1f" % (delta_xy / delta_alt)
+            print("wp%u -> wp%u %s" % (wp1, wp2, slope))
+            return
+        if len(args) != 0:
+            print("Usage: wp slope WP1 WP2")
+            return
+        last_w = None
+        for i in range(1, self.wploader.count()):
+            w = self.wploader.wp(i)
+            if w.command not in [mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, mavutil.mavlink.MAV_CMD_NAV_LAND]:
+                continue
+            if last_w is not None:
+                if last_w.frame != w.frame:
+                    print("WARNING: frame change %u -> %u at %u" % (last_w.frame, w.frame, i))
+                delta_alt = last_w.z - w.z
+                if delta_alt == 0:
+                    slope = "Level"
+                else:
+                    delta_xy = mp_util.gps_distance(w.x, w.y, last_w.x, last_w.y)
+                    slope = "%.1f" % (delta_xy / delta_alt)
+                print("WP%u: slope %s" % (i, slope))
+            last_w = w
+
+            
     def mavlink_packet(self, m):
         '''handle an incoming mavlink packet'''
         mtype = m.get_type()
         if mtype in ['WAYPOINT_COUNT','MISSION_COUNT']:
             self.wploader.expected_count = m.count
             if self.wp_op is None:
-                self.console.error("No waypoint load started")
+                #self.console.error("No waypoint load started")
+                pass
             else:
                 self.wploader.clear()
                 self.console.writeln("Requesting %u waypoints t=%s now=%s" % (m.count,
@@ -99,7 +148,13 @@ class WPModule(mp_module.MPModule):
                                                                                  time.asctime()))
                 self.send_wp_requests()
 
-        elif mtype in ['WAYPOINT', 'MISSION_ITEM'] and self.wp_op != None:
+        elif mtype in ['WAYPOINT', 'MISSION_ITEM', 'MISSION_ITEM_INT'] and self.wp_op is not None:
+            if m.get_type() == 'MISSION_ITEM_INT':
+                if getattr(m, 'mission_type', 0) != 0:
+                    # this is not a mission item, likely fence
+                    return
+                # our internal structure assumes MISSION_ITEM'''
+                m = self.wp_from_mission_item_int(m)
             if m.seq < self.wploader.count():
                 #print("DUPLICATE %u" % m.seq)
                 return
@@ -122,10 +177,14 @@ class WPModule(mp_module.MPModule):
                         w.command, w.frame, w.x, w.y, w.z,
                         w.param1, w.param2, w.param3, w.param4,
                         w.current, w.autocontinue))
-                if self.logdir != None:
-                    waytxt = os.path.join(self.logdir, 'way.txt')
+                if self.logdir is not None:
+                    fname = 'way.txt'
+                    if m.get_srcSystem() != 1:
+                        fname = 'way_%u.txt' % m.get_srcSystem()
+                    waytxt = os.path.join(self.logdir, fname)
                     self.save_waypoints(waytxt)
                     print("Saved waypoints to %s" % waytxt)
+                self.loading_waypoints = False
             elif self.wp_op == "save":
                 self.save_waypoints(self.wp_save_filename)
             self.wp_op = None
@@ -168,12 +227,58 @@ class WPModule(mp_module.MPModule):
             self.menu_added_map = True
             self.module('map').add_menu(self.menu)
 
+    def wp_to_mission_item_int(self, wp):
+        '''convert a MISSION_ITEM to a MISSION_ITEM_INT. We always send as MISSION_ITEM_INT
+           to give cm level accuracy'''
+        if wp.get_type() == 'MISSION_ITEM_INT':
+            return wp
+        wp_int = mavutil.mavlink.MAVLink_mission_item_int_message(wp.target_system,
+                                                                  wp.target_component,
+                                                                  wp.seq,
+                                                                  wp.frame,
+                                                                  wp.command,
+                                                                  wp.current,
+                                                                  wp.autocontinue,
+                                                                  wp.param1,
+                                                                  wp.param2,
+                                                                  wp.param3,
+                                                                  wp.param4,
+                                                                  int(wp.x*1.0e7),
+                                                                  int(wp.y*1.0e7),
+                                                                  wp.z)
+        return wp_int
+
+    def wp_from_mission_item_int(self, wp):
+        '''convert a MISSION_ITEM_INT to a MISSION_ITEM'''
+        wp2 = mavutil.mavlink.MAVLink_mission_item_message(wp.target_system,
+                                                           wp.target_component,
+                                                           wp.seq,
+                                                           wp.frame,
+                                                           wp.command,
+                                                           wp.current,
+                                                           wp.autocontinue,
+                                                           wp.param1,
+                                                           wp.param2,
+                                                           wp.param3,
+                                                           wp.param4,
+                                                           wp.x*1.0e-7,
+                                                           wp.y*1.0e-7,
+                                                           wp.z)
+        # preserve srcSystem as that is used for naming waypoint file
+        wp2._header.srcSystem = wp.get_srcSystem()
+        wp2._header.srcComponent = wp.get_srcComponent()
+        return wp2
+
     def process_waypoint_request(self, m, master):
         '''process a waypoint request from the master'''
+        if (m.target_system != self.settings.source_system or
+            m.target_component != self.settings.source_component):
+            # self.console.error("Mission request is not for me")
+            return
         if (not self.loading_waypoints or
             time.time() > self.loading_waypoint_lasttime + 10.0):
             self.loading_waypoints = False
-            self.console.error("not loading waypoints")
+            #self.console.error("not loading waypoints")
             return
         if m.seq >= self.wploader.count():
             self.console.error("Request for bad waypoint %u (max %u)" % (m.seq, self.wploader.count()))
@@ -181,7 +286,11 @@ class WPModule(mp_module.MPModule):
         wp = self.wploader.wp(m.seq)
         wp.target_system = self.target_system
         wp.target_component = self.target_component
-        self.master.mav.send(self.wploader.wp(m.seq))
+        if self.settings.wp_use_mission_int:
+            wp_send = self.wp_to_mission_item_int(wp)
+        else:
+            wp_send = wp
+        self.master.mav.send(wp_send)
         self.loading_waypoint_lasttime = time.time()
         self.console.writeln("Sent waypoint %u : %s" % (m.seq, self.wploader.wp(m.seq)))
         if m.seq == self.wploader.count() - 1:
@@ -252,6 +361,16 @@ class WPModule(mp_module.MPModule):
             return
         print("Saved %u waypoints to %s" % (self.wploader.count(), filename))
 
+    def save_waypoints_csv(self, filename):
+        '''save waypoints to a file in a human readable CSV file'''
+        try:
+            #need to remove the leading and trailing quotes in filename
+            self.wploader.savecsv(filename.strip('"'))
+        except Exception as msg:
+            print("Failed to save %s - %s" % (filename, msg))
+            return
+        print("Saved %u waypoints to CSV %s" % (self.wploader.count(), filename))
+
     def get_default_frame(self):
         '''default frame for waypoints'''
         if self.settings.terrainalt == 'Auto':
@@ -317,12 +436,36 @@ class WPModule(mp_module.MPModule):
         self.master.waypoint_count_send(self.wploader.count())
         print("Closed loop on mission")
 
+    def nofly_add(self):
+        '''add a square flight exclusion zone'''
+        latlon = self.mpstate.click_location
+        if latlon is None:
+            print("No position chosen")
+            return
+        loader = self.wploader
+        (center_lat, center_lon) = latlon
+        points = []
+        points.append(mp_util.gps_offset(center_lat, center_lon, -25,  25))
+        points.append(mp_util.gps_offset(center_lat, center_lon,  25,  25))
+        points.append(mp_util.gps_offset(center_lat, center_lon,  25, -25))
+        points.append(mp_util.gps_offset(center_lat, center_lon, -25, -25))
+        start_idx = loader.count()
+        for p in points:
+            wp = mavutil.mavlink.MAVLink_mission_item_message(0, 0, 0, 0, mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_EXCLUSION,
+                                                              0, 1, 4, 0, 0, 0, p[0], p[1], 0)
+            loader.add(wp)
+        self.loading_waypoints = True
+        self.loading_waypoint_lasttime = time.time()
+        self.master.mav.mission_write_partial_list_send(self.target_system,
+                                                        self.target_component,
+                                                        start_idx, start_idx+4)
+        print("Added nofly zone")
+        
     def set_home_location(self):
         '''set home location from last map click'''
-        try:
-            latlon = self.module('map').click_position
-        except Exception:
-            print("No map available")
+        latlon = self.mpstate.click_location
+        if latlon is None:
+            print("No position available")
             return
         lat = float(latlon[0])
         lon = float(latlon[1])
@@ -348,11 +491,7 @@ class WPModule(mp_module.MPModule):
         if idx < 1 or idx > self.wploader.count():
             print("Invalid wp number %u" % idx)
             return
-        try:
-            latlon = self.module('map').click_position
-        except Exception:
-            print("No map available")
-            return
+        latlon = self.mpstate.click_location
         if latlon is None:
             print("No map click position available")
             return
@@ -364,7 +503,9 @@ class WPModule(mp_module.MPModule):
         self.undo_type = "move"
 
         (lat, lon) = latlon
-        if getattr(self.console, 'ElevationMap', None) is not None and wp.frame != mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT:
+        if (getattr(self.console, 'ElevationMap', None) is not None and
+            wp.frame == mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT and
+            self.settings.wpterrainadjust):
             alt1 = self.console.ElevationMap.GetElevation(lat, lon)
             alt2 = self.console.ElevationMap.GetElevation(wp.x, wp.y)
             if alt1 is not None and alt2 is not None:
@@ -383,7 +524,7 @@ class WPModule(mp_module.MPModule):
         print("Moved WP %u to %f, %f at %.1fm" % (idx, lat, lon, wp.z))
 
 
-    def cmd_wp_movemulti(self, args):
+    def cmd_wp_movemulti(self, args, latlon=None):
         '''handle wp move of multiple waypoints'''
         if len(args) < 3:
             print("usage: wp movemulti WPNUM WPSTART WPEND <rotation>")
@@ -410,11 +551,8 @@ class WPModule(mp_module.MPModule):
         else:
             rotation = 0
 
-        try:
-            latlon = self.module('map').click_position
-        except Exception:
-            print("No map available")
-            return
+        if latlon is None:
+            latlon = self.mpstate.click_location
         if latlon is None:
             print("No map click position available")
             return
@@ -438,7 +576,9 @@ class WPModule(mp_module.MPModule):
                 b2 = mp_util.gps_bearing(lat, lon, newlat, newlon)
                 (newlat, newlon) = mp_util.gps_newpos(lat, lon, b2+rotation, d2)
 
-            if getattr(self.console, 'ElevationMap', None) is not None and wp.frame != mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT:
+            if (getattr(self.console, 'ElevationMap', None) is not None and
+                wp.frame != mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT and
+                self.settings.wpterrainadjust):
                 alt1 = self.console.ElevationMap.GetElevation(newlat, newlon)
                 alt2 = self.console.ElevationMap.GetElevation(wp.x, wp.y)
                 if alt1 is not None and alt2 is not None:
@@ -488,6 +628,20 @@ class WPModule(mp_module.MPModule):
                                                         idx, idx+count)
         print("Changed alt for WPs %u:%u to %f" % (idx, idx+(count-1), newalt))
 
+    def fix_jumps(self, idx, delta):
+        '''fix up jumps when we add/remove rows'''
+        numrows = self.wploader.count()
+        for row in range(numrows):
+            wp = self.wploader.wp(row)
+            jump_cmds = [mavutil.mavlink.MAV_CMD_DO_JUMP]
+            if hasattr(mavutil.mavlink, "MAV_CMD_DO_CONDITION_JUMP"):
+                jump_cmds.append(mavutil.mavlink.MAV_CMD_DO_CONDITION_JUMP)
+            if wp.command in jump_cmds:
+                p1 = int(wp.param1)
+                if p1 > idx and p1+delta>0:
+                    wp.param1 = float(p1+delta)
+                    self.wploader.set(wp, row)
+
     def cmd_wp_remove(self, args):
         '''handle wp remove'''
         if len(args) != 1:
@@ -505,6 +659,7 @@ class WPModule(mp_module.MPModule):
         self.undo_type = "remove"
 
         self.wploader.remove(wp)
+        self.fix_jumps(idx, -1)
         self.send_all_waypoints()
         print("Removed WP %u" % idx)
 
@@ -526,6 +681,7 @@ class WPModule(mp_module.MPModule):
             print("Undid WP move")
         elif self.undo_type == 'remove':
             self.wploader.insert(self.undo_wp_idx, wp)
+            self.fix_jumps(self.undo_wp_idx, 1)
             self.send_all_waypoints()
             print("Undid WP remove")
         else:
@@ -569,6 +725,85 @@ class WPModule(mp_module.MPModule):
         self.wploader.set(wp, idx)
         print("Set param %u for %u to %f" % (pnum, idx, param[pnum-1]))
 
+    def get_loc(self, m):
+        '''return a mavutil.location for item m'''
+        t = m.get_type()
+        if t == "MISSION_ITEM":
+            lat = m.x * 1e7
+            lng = m.y * 1e7
+            alt = m.z * 1e2
+        elif t == "MISSION_ITEM_INT":
+            lat = m.x
+            lng = m.y
+            alt = m.z
+        else:
+            return None
+        return mavutil.location(lat, lng, alt)
+
+    def cmd_split(self, args):
+        '''splits the segment ended by the supplied waypoint into two'''
+        try:
+            num = int(args[0])
+        except IOError as e:
+            return "Bad wp num (%s)" % args[0]
+
+        if num < 1 or num > self.wploader.count():
+            print("Bad item %s" % str(num))
+            return
+        wp = self.wploader.wp(num)
+        if wp is None:
+            print("Could not get wp %u" % num)
+            return
+        loc = self.get_loc(wp)
+        if loc is None:
+            print("wp is not a location command")
+            return
+
+        prev = num - 1
+        if prev < 1 or prev > self.wploader.count():
+            print("Bad item %u" % num)
+            return
+        prev_wp = self.wploader.wp(prev)
+        if prev_wp is None:
+            print("Could not get previous wp %u" % prev)
+            return
+        prev_loc = self.get_loc(prev_wp)
+        if prev_loc is None:
+            print("previous wp is not a location command")
+            return
+
+        if wp.frame != prev_wp.frame:
+            print("waypoints differ in frame (%u vs %u)" %
+                  (wp.frame, prev_wp.frame))
+            return
+
+        if wp.frame != prev_wp.frame:
+            print("waypoints differ in frame")
+            return
+
+        lat_avg = (loc.lat + prev_loc.lat)/2
+        lng_avg = (loc.lng + prev_loc.lng)/2
+        alt_avg = (loc.alt + prev_loc.alt)/2
+        new_wp = mavutil.mavlink.MAVLink_mission_item_message(
+            self.target_system,
+            self.target_component,
+            wp.seq,    # seq
+            wp.frame,    # frame
+            mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,    # command
+            0,    # current
+            0,    # autocontinue
+            0.0,  # param1,
+            0.0,  # param2,
+            0.0,  # param3
+            0.0,  # param4
+            lat_avg * 1e-7,  # x (latitude)
+            lng_avg * 1e-7,  # y (longitude)
+            alt_avg * 1e-2,  # z (altitude)
+        )
+        self.wploader.insert(wp.seq, new_wp)
+        self.fix_jumps(wp.seq, 1)
+        self.send_all_waypoints()
+
     def cmd_wp(self, args):
         '''waypoint commands'''
         usage = "usage: wp <editor|list|load|update|save|set|clear|loop|remove|move|movemulti|changealt>"
@@ -600,6 +835,11 @@ class WPModule(mp_module.MPModule):
             self.wp_save_filename = args[1]
             self.wp_op = "save"
             self.master.waypoint_request_list_send()
+        elif args[0] == "savecsv":
+            if len(args) != 2:
+                print("usage: wp savecsv <filename.csv>")
+                return
+            self.savecsv(args[1])
         elif args[0] == "savelocal":
             if len(args) != 2:
                 print("usage: wp savelocal <filename>")
@@ -613,7 +853,7 @@ class WPModule(mp_module.MPModule):
         elif args[0] == "move":
             self.cmd_wp_move(args[1:])
         elif args[0] == "movemulti":
-            self.cmd_wp_movemulti(args[1:])
+            self.cmd_wp_movemulti(args[1:], None)
         elif args[0] == "changealt":
             self.cmd_wp_changealt(args[1:])
         elif args[0] == "param":
@@ -627,6 +867,8 @@ class WPModule(mp_module.MPModule):
                 print("usage: wp set <wpindex>")
                 return
             self.master.waypoint_set_current_send(int(args[1]))
+        elif args[0] == "split":
+            self.cmd_split(args[1:])
         elif args[0] == "clear":
             self.master.waypoint_clear_all_send()
             self.wploader.clear()
@@ -650,10 +892,68 @@ class WPModule(mp_module.MPModule):
             self.set_home_location()
         elif args[0] == "loop":
             self.wp_loop()
+        elif args[0] == "noflyadd":
+            self.nofly_add()
         elif args[0] == "status":
             self.wp_status()
+        elif args[0] == "slope":
+            self.wp_slope(args[1:])
         else:
             print(usage)
+
+    def pretty_enum_value(self, enum_name, enum_value):
+        if enum_name == "MAV_FRAME":
+            if enum_value == 0:
+                return "Abs"
+            elif enum_value == 1:
+                return "Local"
+            elif enum_value == 2:
+                return "Mission"
+            elif enum_value == 3:
+                return "Rel"
+            elif enum_value == 4:
+                return "Local ENU"
+            elif enum_value == 5:
+                return "Global (INT)"
+            elif enum_value == 10:
+                return "AGL"
+        ret = mavutil.mavlink.enums[enum_name][enum_value].name
+        ret = ret[len(enum_name)+1:]
+        return ret
+
+    def csv_line(self, line):
+        '''turn a list of values into a CSV line'''
+        self.csv_sep = ","
+        return self.csv_sep.join(['"' + str(x) + '"' for x in line])
+
+    def pretty_parameter_value(self, value):
+        '''pretty parameter value'''
+        return value
+
+    def savecsv(self, filename):
+        '''save waypoints to a file in human-readable CSV file'''
+        f = open(filename, mode='w')
+        headers = ["Seq", "Frame", "Cmd", "P1", "P2", "P3", "P4", "X", "Y", "Z"]
+        print(self.csv_line(headers))
+        f.write(self.csv_line(headers) + "\n")
+        for w in self.wploader.wpoints:
+            if getattr(w, 'comment', None):
+#                f.write("# %s\n" % w.comment)
+                pass
+            out_list = [ w.seq,
+                         self.pretty_enum_value('MAV_FRAME', w.frame),
+                         self.pretty_enum_value('MAV_CMD', w.command),
+                         self.pretty_parameter_value(w.param1),
+                         self.pretty_parameter_value(w.param2),
+                         self.pretty_parameter_value(w.param3),
+                         self.pretty_parameter_value(w.param4),
+                         self.pretty_parameter_value(w.x),
+                         self.pretty_parameter_value(w.y),
+                         self.pretty_parameter_value(w.z),
+                         ]
+            print(self.csv_line(out_list))
+            f.write(self.csv_line(out_list) + "\n")
+        f.close()
 
     def fetch(self):
         """Download wpts from vehicle (this operation is public to support other modules)"""

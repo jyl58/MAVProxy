@@ -1,13 +1,11 @@
 rem build the standalone MAVProxy.exe for Windows.
-rem This assumes Python is installed in C:\Python27
+rem This assumes Python is installed in C:\Python36
 rem   If it is not, change the PYTHON_LOCATION environment variable accordingly
 rem This assumes InnoSetup is installed in C:\Program Files (x86)\Inno Setup 5
 rem   If it is not, change the INNOSETUP environment variable accordingly
-rem This requires Pyinstaller==2.1, setuptools==19.2 and packaging==14.2
-rem and lxml >= 3.7.2
 SETLOCAL enableextensions
 
-if "%PYTHON_LOCATION%" == "" (set "PYTHON_LOCATION=C:\Python27")
+if "%PYTHON_LOCATION%" == "" (set "PYTHON_LOCATION=C:\Python36")
 if "%INNOSETUP%" == "" (set "INNOSETUP=C:\Program Files (x86)\Inno Setup 5")
 
 rem get the version
@@ -20,6 +18,7 @@ for /f "tokens=*" %%a in (
 rem -----build the changelog-----
 "%PYTHON_LOCATION%\python" createChangelog.py
 
+ 
 rem -----Upgrade pymavlink if needed-----
 if exist "..\..\pymavlink" (
  rem Rebuild and use pymavlink from pymavlink sources if available
@@ -41,7 +40,9 @@ rem -----Build MAVProxy-----
 cd ..\
 "%PYTHON_LOCATION%\python" setup.py clean build install
 cd .\MAVProxy
-"%PYTHON_LOCATION%\Scripts\pyinstaller" --clean ..\windows\mavproxy.spec
+copy ..\windows\mavproxy.spec
+"%PYTHON_LOCATION%\Scripts\pyinstaller" -y --clean mavproxy.spec
+del mavproxy.spec
 
 rem -----Create version Info-----
 @echo off

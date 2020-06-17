@@ -1,10 +1,11 @@
+import time
 
 class MPModule(object):
     '''
     The base class for all modules
     '''
 
-    def __init__(self, mpstate, name, description=None, public=False):
+    def __init__(self, mpstate, name, description=None, public=False, multi_instance=False, multi_vehicle=False):
         '''
         Constructor
 
@@ -13,13 +14,25 @@ class MPModule(object):
         self.mpstate = mpstate
         self.name = name
         self.needs_unloading = False
+        self.multi_instance = multi_instance
+        self.multi_vehicle = multi_vehicle
 
         if description is None:
             self.description = name + " handling"
         else:
             self.description = description
+        if multi_instance:
+            if not name in mpstate.multi_instance:
+                mpstate.multi_instance[name] = []
+                mpstate.instance_count[name] = 0
+            mpstate.multi_instance[name].append(self)
+            mpstate.instance_count[name] += 1
+            self.instance = mpstate.instance_count[name]
+            if self.instance > 1:
+                # make the name distincitive, so self.module('map2') works
+                self.name += str(self.instance)
         if public:
-            mpstate.public_modules[name] = self
+            mpstate.public_modules[self.name] = self
 
     #
     # Overridable hooks follow...
@@ -29,7 +42,8 @@ class MPModule(object):
         pass
 
     def unload(self):
-        pass
+        if self.multi_instance and self.name in self.mpstate.multi_instance:
+            self.mpstate.multi_instance.pop(self.name)
 
     def unknown_command(self, args):
         '''Return True if we have handled the unknown command'''
@@ -45,6 +59,28 @@ class MPModule(object):
     def module(self, name):
         '''Find a public module (most modules are private)'''
         return self.mpstate.module(name)
+
+    def module_matching(self, name):
+        '''Find a list of modules matching a wildcard pattern'''
+        import fnmatch
+        ret = []
+        for mname in self.mpstate.public_modules.keys():
+            if fnmatch.fnmatch(mname, name):
+                ret.append(self.mpstate.public_modules[mname])
+        return ret
+
+    def get_time(self):
+        '''get time, using ATTITUDE.time_boot_ms if in SITL with SIM_SPEEDUP != 1'''
+        systime = time.time() - self.mpstate.start_time_s
+        if not self.mpstate.is_sitl:
+            return systime
+        try:
+            speedup = int(self.get_mav_param('SIM_SPEEDUP',1))
+        except Exception:
+            return systime
+        if speedup != 1:
+            return self.mpstate.attitude_time_s
+        return systime
 
     @property
     def console(self):
@@ -108,6 +144,12 @@ class MPModule(object):
         if completions is not None:
             self.mpstate.completions[name] = completions
 
+    def remove_command(self, name):
+        if name in self.mpstate.command_map:
+            del self.mpstate.command_map[name]
+        if name in self.mpstate.completions:
+            del self.mpstate.completions[name]
+
     def add_completion_function(self, name, callback):
         self.mpstate.completion_functions[name] = callback
 
@@ -135,12 +177,16 @@ class MPModule(object):
         '''return a speed in configured units'''
         if self.settings.speed_unit == 'knots':
             return val_ms * 1.94384
+        elif self.settings.speed_unit == 'mph':
+            return val_ms * 2.23694
         return val_ms
 
     def speed_string(self, val_ms):
         '''return a speed as a string'''
         if self.settings.speed_unit == 'knots':
             return "%ukn" % (val_ms * 1.94384)
+        elif self.settings.speed_unit == 'mph':
+            return "%umph" % (val_ms * 2.23694)
         return "%um/s" % val_ms
 
     def set_prompt(self, prompt):
@@ -158,3 +204,10 @@ class MPModule(object):
         else:
             label = str(link.linknum+1)
         return label
+
+    def is_primary_vehicle(self, msg):
+        '''see if a msg is from our primary vehicle'''
+        sysid = msg.get_srcSystem()
+        if self.target_system == 0 or self.target_system == sysid:
+            return True
+        return False

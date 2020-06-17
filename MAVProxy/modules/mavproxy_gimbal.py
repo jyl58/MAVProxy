@@ -76,11 +76,7 @@ class GimbalModule(mp_module.MPModule):
     def cmd_gimbal_roi(self, args):
         '''control roi position'''
         latlon = None
-        try:
-            latlon = self.module('map').click_position
-        except Exception:
-            print("No map available")
-            return
+        latlon = self.mpstate.click_location
         if latlon is None:
             print("No map click position available")
             return
@@ -103,11 +99,7 @@ class GimbalModule(mp_module.MPModule):
             vel[0:3] = args[0:3]
         if (len(args) == 6):
             acc[0:3] = args[3:6]
-        try:
-            latlon = self.module('map').click_position
-        except Exception:
-            print("No map available")
-            return
+        latlon = self.mpstate.click_location
         if latlon is None:
             print("No map click position available")
             latlon = (0,0,0)
@@ -211,8 +203,8 @@ class GimbalModule(mp_module.MPModule):
         # find the intersection with the ground
         pt = line.plane_intersection(ground_plane, forward_only=True)
         if pt is None:
-	    # its pointing up into the sky
-	    return None
+            # its pointing up into the sky
+            return None
 
         (view_lat, view_lon) = mp_util.gps_offset(lat, lon, pt.y, pt.x)
 

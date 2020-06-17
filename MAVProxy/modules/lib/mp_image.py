@@ -9,12 +9,15 @@ June 2012
 '''
 
 import time
-from wx_loader import wx
+from MAVProxy.modules.lib.wx_loader import wx
 import cv2
 import numpy as np
+import warnings
 
 from MAVProxy.modules.lib import mp_util
 from MAVProxy.modules.lib import mp_widgets
+from MAVProxy.modules.lib import win_layout
+from MAVProxy.modules.lib import multiproc
 from MAVProxy.modules.lib.mp_menu import *
 
 
@@ -82,7 +85,6 @@ class MPImage():
                  auto_size = False,
                  report_size_changes = False,
                  daemon = False):
-        import multiprocessing
 
         self.title = title
         self.width = width
@@ -96,15 +98,14 @@ class MPImage():
         self.menu = None
         self.popup_menu = None
 
-        from multiprocessing_queue import makeIPCQueue
-        self.in_queue = makeIPCQueue()
-        self.out_queue = makeIPCQueue()
+        self.in_queue = multiproc.Queue()
+        self.out_queue = multiproc.Queue()
 
         self.default_menu = MPMenuSubMenu('View',
                                           items=[MPMenuItem('Fit Window', 'Fit Window', 'fitWindow'),
                                                  MPMenuItem('Full Zoom',  'Full Zoom', 'fullSize')])
 
-        self.child = multiprocessing.Process(target=self.child_task)
+        self.child = multiproc.Process(target=self.child_task)
         self.child.daemon = daemon
         self.child.start()
         self.set_popup_menu(self.default_menu)
@@ -112,7 +113,7 @@ class MPImage():
     def child_task(self):
         '''child process - this holds all the GUI elements'''
         mp_util.child_close_fds()
-        from wx_loader import wx
+        from MAVProxy.modules.lib.wx_loader import wx
         state = self
 
         self.app = wx.App(False)
@@ -170,15 +171,28 @@ class MPImage():
 
     def poll(self):
         '''check for events, returning one event'''
-        if self.out_queue.qsize():
-            return self.out_queue.get()
-        return None
+        if self.out_queue.qsize() <= 0:
+            return None
+        evt = self.out_queue.get()
+        while isinstance(evt, win_layout.WinLayout):
+            win_layout.set_layout(evt, self.set_layout)
+            if self.out_queue.qsize() == 0:
+                return None
+            evt = self.out_queue.get()
+        return evt
 
+    def set_layout(self, layout):
+        '''set window layout'''
+        self.in_queue.put(layout)
+    
     def events(self):
         '''check for events a list of events'''
         ret = []
-        while self.out_queue.qsize():
-            ret.append(self.out_queue.get())
+        while True:
+            e = self.poll()
+            if e is None:
+                break
+            ret.append(e)
         return ret
 
     def terminate(self):
@@ -196,6 +210,7 @@ class MPImageFrame(wx.Frame):
         wx.Frame.__init__(self, None, wx.ID_ANY, state.title)
         self.state = state
         state.frame = self
+        self.last_layout_send = time.time()
         self.sizer = wx.BoxSizer(wx.VERTICAL)
         state.panel = MPImagePanel(self, state)
         self.sizer.Add(state.panel, 1, wx.EXPAND)
@@ -206,6 +221,10 @@ class MPImageFrame(wx.Frame):
     def on_idle(self, event):
         '''prevent the main loop spinning too fast'''
         state = self.state
+        now = time.time()
+        if now - self.last_layout_send > 1:
+            self.last_layout_send = now
+            state.out_queue.put(win_layout.get_wx_window_layout(self))
         time.sleep(0.1)
 
 class MPImagePanel(wx.Panel):
@@ -240,7 +259,9 @@ class MPImagePanel(wx.Panel):
         self.SetSizer(self.mainSizer)
 
         # panel for the main image
-        self.imagePanel = mp_widgets.ImagePanel(self, wx.EmptyImage(state.width,state.height))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            self.imagePanel = mp_widgets.ImagePanel(self, wx.EmptyImage(state.width,state.height))
         self.mainSizer.Add(self.imagePanel, flag=wx.TOP|wx.LEFT|wx.GROW, border=0)
         if state.mouse_events:
             self.imagePanel.Bind(wx.EVT_MOUSE_EVENTS, self.on_event)
@@ -254,9 +275,6 @@ class MPImagePanel(wx.Panel):
 
         self.redraw()
         state.frame.Fit()
-
-    def on_focus(self, event):
-        self.imagePanel.SetFocus()
 
     def on_focus(self, event):
         '''called when the panel gets focus'''
@@ -332,9 +350,15 @@ class MPImagePanel(wx.Panel):
         are downloaded'''
         state = self.state
         while state.in_queue.qsize():
-            obj = state.in_queue.get()
+            try:
+                obj = state.in_queue.get()
+            except Exception:
+                time.sleep(0.05)
+                return
             if isinstance(obj, MPImageData):
-                img = wx.EmptyImage(obj.width, obj.height)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore')
+                    img = wx.EmptyImage(obj.width, obj.height)
                 img.SetData(obj.data)
                 self.img = img
                 self.need_redraw = True
@@ -359,6 +383,9 @@ class MPImagePanel(wx.Panel):
                 self.full_size()
             if isinstance(obj, MPImageFitToWindow):
                 self.fit_to_window()
+            if isinstance(obj, win_layout.WinLayout):
+                win_layout.set_wx_window_layout(state.frame, obj)
+                
         if self.need_redraw:
             self.redraw()
 
@@ -457,7 +484,11 @@ class MPImagePanel(wx.Panel):
 
         if event.LeftDown():
             self.mouse_down = self.image_coordinates(pos)
-        if event.Dragging() and event.ButtonIsDown(wx.MOUSE_BTN_LEFT):
+        if hasattr(event, 'ButtonIsDown'):
+            left_button_down = event.ButtonIsDown(wx.MOUSE_BTN_LEFT)
+        else:
+            left_button_down = event.leftIsDown
+        if event.Dragging() and left_button_down:
             self.on_drag_event(event)
 
     def on_key_event(self, event):
@@ -476,11 +507,14 @@ class MPImagePanel(wx.Panel):
             self.on_mouse_event(event)
         if isinstance(event, wx.KeyEvent):
             self.on_key_event(event)
-        if (isinstance(event, wx.MouseEvent) and
-            not event.ButtonIsDown(wx.MOUSE_BTN_ANY) and
-            event.GetWheelRotation() == 0):
-            # don't flood the queue with mouse movement
-            return
+        if isinstance(event, wx.MouseEvent):
+            if hasattr(event, 'ButtonIsDown'):
+                any_button_down = event.ButtonIsDown(wx.MOUSE_BTN_ANY)
+            else:
+                any_button_down = event.leftIsDown or event.rightIsDown
+            if not any_button_down and event.GetWheelRotation() == 0:
+                # don't flood the queue with mouse movement
+                return
         evt = mp_util.object_container(event)
         pt = self.image_coordinates(wx.Point(evt.X,evt.Y))
         evt.X = pt.x

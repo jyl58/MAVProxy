@@ -1,4 +1,4 @@
-from wx_loader import wx
+from MAVProxy.modules.lib.wx_loader import wx
 import time
 import numpy, pylab
 
@@ -25,8 +25,12 @@ class GraphFrame(wx.Frame):
         self.last_yrange = (None, None)
 
     def create_main_panel(self):
-        from matplotlib.backends.backend_wxagg import \
-             FigureCanvasWxAgg as FigCanvas
+        import platform
+        if platform.system() == 'Darwin':
+            from MAVProxy.modules.lib.MacOS import backend_wxagg
+            FigCanvas = backend_wxagg.FigureCanvasWxAgg
+        else:
+            from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigCanvas
         self.panel = wx.Panel(self)
 
         self.init_plot()
@@ -133,6 +137,7 @@ class GraphFrame(wx.Frame):
             self.plot_data[i].set_ydata(ydata)
 
         self.canvas.draw()
+        self.canvas.Refresh()
 
     def on_pause_button(self, event):
         self.paused = not self.paused
@@ -162,6 +167,11 @@ class GraphFrame(wx.Frame):
         if self.paused:
             return
         for i in range(len(self.plot_data)):
+            if (type(state.values[i]) == list):
+                print("ERROR: Cannot plot array of length %d. Use 'graph %s[index]' instead"%(len(state.values[i]), state.fields[i]))
+                self.redraw_timer.Stop()
+                self.Destroy()
+                return
             if state.values[i] is not None:
                 self.data[i].append(state.values[i])
                 while len(self.data[i]) > len(self.xdata):
