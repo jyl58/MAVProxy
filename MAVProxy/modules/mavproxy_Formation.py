@@ -78,7 +78,7 @@ import errno
 import time
 import math
 import threading
-
+import os
 import lcm
 
 from MAVProxy.modules.lib import mp_module
