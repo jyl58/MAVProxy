@@ -68,6 +68,61 @@ class pos_info_t(object):
         return pos_info_t._packed_fingerprint
     _get_packed_fingerprint = staticmethod(_get_packed_fingerprint)
 
+
+"""
+status to qgc
+"""
+class status_t(object):
+    __slots__ = ["sysid"]
+
+    __typenames__ = ["int16_t"]
+
+    __dimensions__ = [None]
+
+    def __init__(self):
+        self.sysid = 0
+
+    def encode(self):
+        buf = BytesIO()
+        buf.write(status_t._get_packed_fingerprint())
+        self._encode_one(buf)
+        return buf.getvalue()
+
+    def _encode_one(self, buf):
+        buf.write(struct.pack(">h", self.sysid))
+
+    def decode(data):
+        if hasattr(data, 'read'):
+            buf = data
+        else:
+            buf = BytesIO(data)
+        if buf.read(8) != status_t._get_packed_fingerprint():
+            raise ValueError("Decode error")
+        return status_t._decode_one(buf)
+    decode = staticmethod(decode)
+
+    def _decode_one(buf):
+        self = status_t()
+        self.sysid = struct.unpack(">h", buf.read(2))[0]
+        return self
+    _decode_one = staticmethod(_decode_one)
+
+    _hash = None
+    def _get_hash_recursive(parents):
+        if status_t in parents: return 0
+        tmphash = (0xa686a4dbe27ada97) & 0xffffffffffffffff
+        tmphash  = (((tmphash<<1)&0xffffffffffffffff) + (tmphash>>63)) & 0xffffffffffffffff
+        return tmphash
+    _get_hash_recursive = staticmethod(_get_hash_recursive)
+    _packed_fingerprint = None
+
+    def _get_packed_fingerprint():
+        if status_t._packed_fingerprint is None:
+            status_t._packed_fingerprint = struct.pack(">Q", status_t._get_hash_recursive([]))
+        return status_t._packed_fingerprint
+    _get_packed_fingerprint = staticmethod(_get_packed_fingerprint)
+
+
 """
     Formation conmunication mavproxy module
     independ: lcm
@@ -110,6 +165,11 @@ class Formation(mp_module.MPModule):
                     self._handle_thread = threading.Thread(target=self.lcmHandleThread)
                     self._handle_thread.daemon = True
                     self._handle_thread.start()
+            '''pub link msg to qgc'''
+            if self._lcm:
+                state=status_t()
+                state.sysid=msg.get_srcSystem()
+                self._lcm.publish("STATUS",state.encode())
 
         elif msg.get_type()=="GLOBAL_POSITION_INT":
             if not self._is_leader:
