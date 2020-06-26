@@ -116,7 +116,7 @@ class Formation(mp_module.MPModule):
                 return
 
             pos_info=pos_info_t()
-            pos_info.timestamp=int(time.time() * 1000000) #us
+            pos_info.timestamp=msg.time_boot_ms
             pos_info.lat  = msg.lat   #degE7
             pos_info.lon  = msg.lon   #degE7
             pos_info.alt  = msg.alt   #alt
@@ -150,7 +150,7 @@ class Formation(mp_module.MPModule):
         print("lat="+str(lcm_msg.lat)+"; lon="+str(lcm_msg.lon)+"; vx="+str(lcm_msg.vx)+"cm/s; vy="+str(lcm_msg.vy)+"cm/s"+"; head="+str(lcm_msg.head))
         #send msg to flight control
         self.master.mav.global_position_int_send(
-            0,   # time_boot_ms (not used)
+            lcm_msg.timestamp,   # time_boot_ms ()
             lcm_msg.lat,    
             lcm_msg.lon,   #leader current location 
             lcm_msg.alt,  # alt 
