@@ -126,6 +126,7 @@ class Formation(mp_module.MPModule):
             pos_info.vz   = msg.vz    #cm/s
             pos_info.head = msg.hdg   #deg*100
             if self._lcm:
+                print("timestamp="+str(pos_info.timestamp))
                 print("Pub leader's lat="+str(pos_info.lat)+"; lon="+str(pos_info.lon)+"; vx="+str(pos_info.vx)+"cm/s; vy="+str(pos_info.vy)+"cm/s"+"; head="+str(pos_info.head))
                 #TODO: add process the pos data code
                 self._lcm.publish("Leader_Pos",pos_info.encode())
@@ -147,6 +148,7 @@ class Formation(mp_module.MPModule):
     def handleLeaderPos(self,channel, data):
         lcm_msg = pos_info_t.decode(data)
         print("Sub leader's location info:")
+        print("timestamp="+str(lcm_msg.timestamp))
         print("lat="+str(lcm_msg.lat)+"; lon="+str(lcm_msg.lon)+"; vx="+str(lcm_msg.vx)+"cm/s; vy="+str(lcm_msg.vy)+"cm/s"+"; head="+str(lcm_msg.head))
         #send msg to flight control
         self.master.mav.global_position_int_send(
