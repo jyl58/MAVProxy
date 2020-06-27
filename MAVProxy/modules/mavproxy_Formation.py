@@ -187,13 +187,13 @@ class Formation(mp_module.MPModule):
             pos_info.head = msg.hdg   #deg*100
             if self._lcm:
                 print("timestamp="+str(pos_info.timestamp))
-                print("Pub leader's lat="+str(pos_info.lat)+"; lon="+str(pos_info.lon)+"; vx="+str(pos_info.vx)+"cm/s; vy="+str(pos_info.vy)+"cm/s"+"; head="+str(pos_info.head))
                 #multicast the leader's info
                 leader_vel=math.sqrt(pos_info.vx**2+pos_info.vy**2)
                 if leader_vel< 20:  #20cm/s
                     print("leader's vel="+str(leader_vel)+"<20cm/s,do not send to follower")
                     return
 
+                print("Pub leader's lat="+str(pos_info.lat)+"; lon="+str(pos_info.lon)+"; vx="+str(pos_info.vx)+"cm/s; vy="+str(pos_info.vy)+"cm/s"+"; head="+str(pos_info.head))
                 self._lcm.publish("Leader_Pos",pos_info.encode())
             else:
                 print("lcm is None")
