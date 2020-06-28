@@ -189,8 +189,8 @@ class Formation(mp_module.MPModule):
                 print("timestamp="+str(pos_info.timestamp))
                 #multicast the leader's info
                 leader_vel=math.sqrt(pos_info.vx**2+pos_info.vy**2)
-                if leader_vel< 20:  #20cm/s
-                    print("leader's vel="+str(leader_vel)+" <20cm/s,do not send to follower")
+                if leader_vel< 10:  #20cm/s
+                    print("leader's vel="+str(leader_vel)+" <10cm/s,do not send to follower")
                     return
 
                 print("Pub leader's lat="+str(pos_info.lat)+"; lon="+str(pos_info.lon)+"; vx="+str(pos_info.vx)+"cm/s; vy="+str(pos_info.vy)+"cm/s"+"; head="+str(pos_info.head))
