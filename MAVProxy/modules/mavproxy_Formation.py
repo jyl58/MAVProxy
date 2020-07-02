@@ -176,12 +176,10 @@ class Formation(mp_module.MPModule):
             if not self._is_leader:
                 return
             
-            if msg.servo1_raw>1500 and msg.servo3_raw >1500:
-                self._should_pub_leader_msg=True
-            elif msg.servo1_raw<1500 and msg.servo3_raw <1500:
-                self._should_pub_leader_msg=True
-            else:
+            if (msg.servo1_raw>1500 and msg.servo3_raw <1500) or(msg.servo1_raw<1500  and msg.servo3_raw >1500 ) or(msg.servo1_raw==1500  and msg.servo3_raw ==1500):
                 self._should_pub_leader_msg=False
+            else:
+                self._should_pub_leader_msg=True
 
         elif msg.get_type()=="GLOBAL_POSITION_INT":
             if not self._is_leader:
@@ -200,10 +198,6 @@ class Formation(mp_module.MPModule):
             if self._lcm:
                 print("timestamp="+str(pos_info.timestamp))
                 #multicast the leader's info
-                #leader_vel=math.sqrt(pos_info.vx**2+pos_info.vy**2)
-                #if leader_vel< 10:  #20cm/s
-                #    print("leader's vel="+str(leader_vel)+" <10cm/s,do not send to follower")
-                #    return
                 if not self._should_pub_leader_msg:
                     print("leader is not move, so do not send to follower")
                     return
