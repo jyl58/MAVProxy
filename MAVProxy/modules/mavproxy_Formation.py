@@ -171,7 +171,7 @@ class Formation(mp_module.MPModule):
                 state=status_t()
                 state.sysid=msg.get_srcSystem()
                 self._lcm.publish("STATUS",state.encode())
-        
+
         elif msg.get_type()=="SERVO_OUTPUT_RAW":
             if not self._is_leader:
                 return
@@ -182,7 +182,6 @@ class Formation(mp_module.MPModule):
                 self._should_pub_leader_msg=True
             else:
                 self._should_pub_leader_msg=False
-
 
         elif msg.get_type()=="GLOBAL_POSITION_INT":
             if not self._is_leader:
