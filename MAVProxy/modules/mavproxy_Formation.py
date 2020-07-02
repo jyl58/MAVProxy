@@ -147,6 +147,7 @@ class Formation(mp_module.MPModule):
         self._is_leader=False
         self._sub=None
         self._handle_thread=None
+        self._should_pub_leader_msg=False
         print("Init the Formation module")
 
     def mavlink_packet(self, msg):
@@ -170,6 +171,18 @@ class Formation(mp_module.MPModule):
                 state=status_t()
                 state.sysid=msg.get_srcSystem()
                 self._lcm.publish("STATUS",state.encode())
+        
+        elif msg.get_type()=="SERVO_OUTPUT_RAW":
+            if not self._is_leader:
+                return
+            
+            if msg.servo1_raw>1500 and msg.servo3_raw >1500:
+                self._should_pub_leader_msg=True
+            elif msg.servo1_raw<1500 and msg.servo3_raw <1500:
+                self._should_pub_leader_msg=True
+            else:
+                self._should_pub_leader_msg=False
+
 
         elif msg.get_type()=="GLOBAL_POSITION_INT":
             if not self._is_leader:
@@ -188,9 +201,12 @@ class Formation(mp_module.MPModule):
             if self._lcm:
                 print("timestamp="+str(pos_info.timestamp))
                 #multicast the leader's info
-                leader_vel=math.sqrt(pos_info.vx**2+pos_info.vy**2)
-                if leader_vel< 10:  #20cm/s
-                    print("leader's vel="+str(leader_vel)+" <10cm/s,do not send to follower")
+                #leader_vel=math.sqrt(pos_info.vx**2+pos_info.vy**2)
+                #if leader_vel< 10:  #20cm/s
+                #    print("leader's vel="+str(leader_vel)+" <10cm/s,do not send to follower")
+                #    return
+                if not self._should_pub_leader_msg:
+                    print("leader is not move, so do not send to follower")
                     return
 
                 print("Pub leader's lat="+str(pos_info.lat)+"; lon="+str(pos_info.lon)+"; vx="+str(pos_info.vx)+"cm/s; vy="+str(pos_info.vy)+"cm/s"+"; head="+str(pos_info.head))
