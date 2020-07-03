@@ -306,10 +306,12 @@ class Formation(mp_module.MPModule):
         print("leader's command "+str(cmd.command))
         if cmd.command==0:
             if self.status.flightmode != "HOLD":
-                self.status.flightmode ="HOLD"
+                mode_mapping = self.master.mode_mapping()
+                self.master.set_mode(mode_mapping["HOLD"])
         elif cmd.command==1:
             if self.status.flightmode != "FOLLOW":
-                self.status.flightmode = "FOLLOW"
+                mode_mapping = self.master.mode_mapping()
+                self.master.set_mode(mode_mapping["FOLLOW"])
 
 
     def idle_task(self):
