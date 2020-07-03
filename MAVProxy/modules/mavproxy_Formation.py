@@ -196,7 +196,8 @@ class Formation(mp_module.MPModule):
         super(Formation, self).__init__(mpstate, "Formation", "formation control")
         self._lcm=None
         self._is_leader=False
-        self._sub=None
+        self._sub_pos=None
+        self._sub_cmd=None
         self._handle_thread=None
         self._should_pub_leader_msg=False
         print("Init the Formation module")
@@ -206,15 +207,12 @@ class Formation(mp_module.MPModule):
         if msg.get_type()=="HEARTBEAT":
             if msg.get_srcSystem()==1:
                 self._is_leader=True
-                if self._lcm and self._sub:
-                   self._lcm.unsubscribe(self._sub)
-                   self._sub=None
             else:
                 self._is_leader=False
-                if self._lcm and not self._sub:
+                if self._lcm and not self._sub_pos:
                     print("Sub the leader's global location")
-                    self._sub=self._lcm.subscribe("Leader_Pos", self.handleLeaderPos)
-                    self._sub=self._lcm.subscribe("Command", self.handleCommand)
+                    self._sub_pos=self._lcm.subscribe("Leader_Pos", self.handleLeaderPos)
+                    self._sub_cmd=self._lcm.subscribe("Command", self.handleCommand)
                     self._handle_thread = threading.Thread(target=self.lcmHandleThread)
                     self._handle_thread.daemon = True
                     self._handle_thread.start()
