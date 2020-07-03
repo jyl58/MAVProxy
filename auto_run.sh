@@ -6,6 +6,6 @@ if [ -n "$pid" ]; then
 	sudo kill -9 "$pid"
 fi
 
-(screen -dm mavproxy.py --master=/dev/ttyACM0,115200 --out=udpin:0.0.0.0:15440 --default-modules=Formation) > /dev/null 2>&1 &
+(screen -dm mavproxy.py --master=/dev/ttyACM0,115200 --out=udpin:0.0.0.0:15440 --default-modules=Formation,mode,param) > /dev/null 2>&1 &
 
 exit 0
