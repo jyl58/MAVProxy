@@ -68,6 +68,57 @@ class pos_info_t(object):
         return pos_info_t._packed_fingerprint
     _get_packed_fingerprint = staticmethod(_get_packed_fingerprint)
 
+'''cmd to fllower'''
+class command_t(object):
+    __slots__ = ["command"]
+
+    __typenames__ = ["int16_t"]
+
+    __dimensions__ = [None]
+
+    def __init__(self):
+        self.command = 0
+
+    def encode(self):
+        buf = BytesIO()
+        buf.write(command_t._get_packed_fingerprint())
+        self._encode_one(buf)
+        return buf.getvalue()
+
+    def _encode_one(self, buf):
+        buf.write(struct.pack(">h", self.command))
+
+    def decode(data):
+        if hasattr(data, 'read'):
+            buf = data
+        else:
+            buf = BytesIO(data)
+        if buf.read(8) != command_t._get_packed_fingerprint():
+            raise ValueError("Decode error")
+        return command_t._decode_one(buf)
+    decode = staticmethod(decode)
+
+    def _decode_one(buf):
+        self = command_t()
+        self.command = struct.unpack(">h", buf.read(2))[0]
+        return self
+    _decode_one = staticmethod(_decode_one)
+
+    _hash = None
+    def _get_hash_recursive(parents):
+        if command_t in parents: return 0
+        tmphash = (0x304d4fab5f291c2c) & 0xffffffffffffffff
+        tmphash  = (((tmphash<<1)&0xffffffffffffffff) + (tmphash>>63)) & 0xffffffffffffffff
+        return tmphash
+    _get_hash_recursive = staticmethod(_get_hash_recursive)
+    _packed_fingerprint = None
+
+    def _get_packed_fingerprint():
+        if command_t._packed_fingerprint is None:
+            command_t._packed_fingerprint = struct.pack(">Q", command_t._get_hash_recursive([]))
+        return command_t._packed_fingerprint
+    _get_packed_fingerprint = staticmethod(_get_packed_fingerprint)
+
 
 """
 status to qgc
@@ -163,6 +214,7 @@ class Formation(mp_module.MPModule):
                 if self._lcm and not self._sub:
                     print("Sub the leader's global location")
                     self._sub=self._lcm.subscribe("Leader_Pos", self.handleLeaderPos)
+                    self._sub=self._lcm.subscribe("Command", self.handleCommand)
                     self._handle_thread = threading.Thread(target=self.lcmHandleThread)
                     self._handle_thread.daemon = True
                     self._handle_thread.start()
@@ -195,15 +247,20 @@ class Formation(mp_module.MPModule):
             pos_info.vy   = msg.vy    #cm/s
             pos_info.vz   = msg.vz    #cm/s
             pos_info.head = msg.hdg   #deg*100
+            # leader's command to follow
+            command=command_t()
             if self._lcm:
                 print("timestamp="+str(pos_info.timestamp))
                 #multicast the leader's info
-                if not self._should_pub_leader_msg:
-                    print("leader is not move, so do not send to follower")
-                    return
+                if not self._should_pub_leader_msg: 
+                    command.command=0  #0 is hold the follower
+                    print("leader is not move, pub cmd set the follower to hold mode: "+str(command.command))
+                else:
+                    command.command=1
+                    print("Pub leader's lat="+str(pos_info.lat)+"; lon="+str(pos_info.lon)+"; vx="+str(pos_info.vx)+"cm/s; vy="+str(pos_info.vy)+"cm/s"+"; head="+str(pos_info.head))
+                    self._lcm.publish("Leader_Pos",pos_info.encode())
 
-                print("Pub leader's lat="+str(pos_info.lat)+"; lon="+str(pos_info.lon)+"; vx="+str(pos_info.vx)+"cm/s; vy="+str(pos_info.vy)+"cm/s"+"; head="+str(pos_info.head))
-                self._lcm.publish("Leader_Pos",pos_info.encode())
+                self._lcm.publish("Command",command.encode())
             else:
                 print("lcm is None")
 
@@ -220,6 +277,9 @@ class Formation(mp_module.MPModule):
 
 
     def handleLeaderPos(self,channel, data):
+        if channel != "Leader_Pos":
+            return
+
         lcm_msg = pos_info_t.decode(data)
         print("Sub leader's location info:")
         print("timestamp="+str(lcm_msg.timestamp))
@@ -237,6 +297,19 @@ class Formation(mp_module.MPModule):
             lcm_msg.vz, 
             lcm_msg.head    # head 
             )
+
+    def handleCommand(self,channel, data):
+        if channel != "Command":
+            return
+
+        cmd=command_t.decode(data)
+        print("leader's command "+str(cmd.command))
+        if cmd.command==0:
+            if self.status.flightmode != "HOLD":
+                self.status.flightmode ="HOLD"
+        elif cmd.command==1:
+            if self.status.flightmode != "FOLLOW":
+                self.status.flightmode = "FOLLOW"
 
 
     def idle_task(self):
