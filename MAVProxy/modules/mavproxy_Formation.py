@@ -303,11 +303,11 @@ class Formation(mp_module.MPModule):
         cmd=command_t.decode(data)
         print("leader's command "+str(cmd.command))
         if cmd.command==0:
-            if self.master and self.status.flightmode != "HOLD":
+            if self.master and self.status.flightmode != "HOLD" and self.status.flightmode != "MANUAL":
                 mode_mapping = self.master.mode_mapping()
                 self.master.set_mode(mode_mapping["HOLD"])
         elif cmd.command==1:
-            if self.master and self.status.flightmode != "FOLLOW":
+            if self.master and self.status.flightmode != "FOLLOW" and self.status.flightmode != "MANUAL":
                 mode_mapping = self.master.mode_mapping()
                 self.master.set_mode(mode_mapping["FOLLOW"])
 
