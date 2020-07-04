@@ -234,7 +234,7 @@ class Formation(mp_module.MPModule):
             if not self._is_leader:
                 return
             
-            if (msg.servo1_raw>1500 and msg.servo3_raw <1500 and math.abs(msg.servo1_raw)==math.abs(msg.servo3_raw)) or(msg.servo1_raw<1500  and msg.servo3_raw >1500 and math.abs(msg.servo1_raw)==math.abs(msg.servo3_raw)) or(msg.servo1_raw==1500  and msg.servo3_raw ==1500) or (msg.servo1_raw<1500 and msg.servo3_raw <1500):
+            if ((msg.servo1_raw-1500)*(msg.servo3_raw-1500)<0 and math.abs(msg.servo1_raw)==math.abs(msg.servo3_raw)) or(msg.servo1_raw==1500  and msg.servo3_raw ==1500) or (msg.servo1_raw<1500 and msg.servo3_raw <1500):
                 self._should_pub_leader_msg=False
             else:
                 self._should_pub_leader_msg=True
