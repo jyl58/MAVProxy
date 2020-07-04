@@ -198,6 +198,7 @@ class Formation(mp_module.MPModule):
         self._is_leader=False
         self._sub_pos=None
         self._sub_cmd=None
+        self._exec_formation=True
         self._handle_thread=None
         self._should_pub_leader_msg=False
         print("Init the Formation module")
@@ -207,6 +208,14 @@ class Formation(mp_module.MPModule):
         if msg.get_type()=="HEARTBEAT":
             if msg.get_srcSystem()==1:
                 self._is_leader=True
+                '''unsub the channel on leader'''
+                if self._lcm and self._sub_pos:
+                    self._lcm.unsubscribe(self._sub_pos)
+                    self._sub_pos=None
+
+                if  self._lcm and self._sub_cmd:
+                    self._lcm.unsubscribe(self._sub_cmd)
+                    self._sub_cmd=None
             else:
                 self._is_leader=False
                 if self._lcm and not self._sub_pos:
@@ -233,6 +242,10 @@ class Formation(mp_module.MPModule):
 
         elif msg.get_type()=="GLOBAL_POSITION_INT":
             if not self._is_leader:
+                return
+
+            if not self._exec_formation:
+                print("formation operator is not enable,if need please use qgc open it" )
                 return
 
             pos_info=pos_info_t()
