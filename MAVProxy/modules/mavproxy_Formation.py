@@ -244,7 +244,7 @@ class Formation(mp_module.MPModule):
                 return
 
             current_param_count, all_param_count = self.module('param').param_status()
-            if current_param_count!=all_param_count:
+            if self.get_mav_param("FOLL_ENABLE")==None:
                 print("Waiting param download complete.")
                 return 
             if int(self.get_mav_param("FOLL_ENABLE"))==0:
