@@ -243,7 +243,6 @@ class Formation(mp_module.MPModule):
             if not self._is_leader:
                 return
 
-            current_param_count, all_param_count = self.module('param').param_status()
             if self.get_mav_param("FOLL_ENABLE")==None:
                 print("Waiting param download complete.")
                 return 
@@ -316,9 +315,8 @@ class Formation(mp_module.MPModule):
         if channel != "Command":
             return
 
-        '''check formation operateor'''
-        current_param_count, all_param_count = self.module('param').param_status()
-        if current_param_count!=all_param_count:
+        '''check formation param'''
+        if self.get_mav_param("FOLL_ENABLE")==None:
             print("Waiting param download complete.")
             return
 
