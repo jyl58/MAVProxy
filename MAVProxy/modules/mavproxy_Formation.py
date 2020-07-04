@@ -200,12 +200,13 @@ class Formation(mp_module.MPModule):
         self._sub_cmd=None
         self._handle_thread=None
         self._should_pub_leader_msg=False
+        self._leader_id=1
         print("Init the Formation module")
 
     def mavlink_packet(self, msg):
         '''handle a mavlink packet'''
         if msg.get_type()=="HEARTBEAT":
-            if msg.get_srcSystem()==1:
+            if msg.get_srcSystem()==self._leader_id:
                 self._is_leader=True
                 '''unsub the channel on leader'''
                 if self._lcm and self._sub_pos:
@@ -293,6 +294,9 @@ class Formation(mp_module.MPModule):
         if channel != "Leader_Pos":
             return
 
+        if self._is_leader:
+            return
+
         lcm_msg = pos_info_t.decode(data)
         print("Sub leader's location info:")
         print("timestamp="+str(lcm_msg.timestamp))
@@ -313,6 +317,9 @@ class Formation(mp_module.MPModule):
 
     def handleCommand(self,channel, data):
         if channel != "Command":
+            return
+
+        if self._is_leader:
             return
 
         '''check formation param'''
@@ -337,6 +344,9 @@ class Formation(mp_module.MPModule):
 
 
     def idle_task(self):
+        if self.get_mav_param("SC_LEADER_ID")!=None and int(self.get_mav_param("SC_LEADER_ID"))!=self._leader_id:
+            self._leader_id=int(self.get_mav_param("SC_LEADER_ID"))
+            print("change leader to id: "+str(self._leader_id))
         if self._lcm==None:
             ip=os.popen('hostname -I').read().splitlines()[0]
             if len(ip)>0:
