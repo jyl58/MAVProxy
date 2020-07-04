@@ -198,7 +198,6 @@ class Formation(mp_module.MPModule):
         self._is_leader=False
         self._sub_pos=None
         self._sub_cmd=None
-        self._exec_formation=True
         self._handle_thread=None
         self._should_pub_leader_msg=False
         print("Init the Formation module")
@@ -244,8 +243,12 @@ class Formation(mp_module.MPModule):
             if not self._is_leader:
                 return
 
-            if not self._exec_formation:
-                print("formation operator is not enable,if need please use qgc open it" )
+            current_param_count, all_param_count = self.module('param').param_status()
+            if current_param_count!=all_param_count:
+                print("Waiting param download complete.")
+                return 
+            if int(self.get_mav_param("FOLL_ENABLE"))==0:
+                print("Formation operator is not enable,if need please use qgc open it.")
                 return
 
             pos_info=pos_info_t()
@@ -311,6 +314,16 @@ class Formation(mp_module.MPModule):
 
     def handleCommand(self,channel, data):
         if channel != "Command":
+            return
+
+        '''check formation operateor'''
+        current_param_count, all_param_count = self.module('param').param_status()
+        if current_param_count!=all_param_count:
+            print("Waiting param download complete.")
+            return
+
+        if int(self.get_mav_param("FOLL_ENABLE"))==0:
+            print("This MAV does not open formation operator,pleae open it if need")
             return
 
         cmd=command_t.decode(data)
