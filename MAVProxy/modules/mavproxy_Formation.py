@@ -218,7 +218,7 @@ class Formation(mp_module.MPModule):
             else:
                 self._is_leader=False
                 if self._lcm and not self._sub_pos:
-                    print("Sub the leader's global location")
+                    print("Sub the formation's topic")
                     self._sub_pos=self._lcm.subscribe("Leader_Pos", self.handleLeaderPos)
                     self._sub_cmd=self._lcm.subscribe("Command", self.handleCommand)
                     self._handle_thread = threading.Thread(target=self.lcmHandleThread)
@@ -234,7 +234,7 @@ class Formation(mp_module.MPModule):
             if not self._is_leader:
                 return
             
-            if (msg.servo1_raw>1500 and msg.servo3_raw <1500) or(msg.servo1_raw<1500  and msg.servo3_raw >1500 ) or(msg.servo1_raw==1500  and msg.servo3_raw ==1500):
+            if (msg.servo1_raw>1500 and msg.servo3_raw <1500 and math.abs(msg.servo1_raw)==math.abs(msg.servo3_raw)) or(msg.servo1_raw<1500  and msg.servo3_raw >1500 and math.abs(msg.servo1_raw)==math.abs(msg.servo3_raw)) or(msg.servo1_raw==1500  and msg.servo3_raw ==1500):
                 self._should_pub_leader_msg=False
             else:
                 self._should_pub_leader_msg=True
