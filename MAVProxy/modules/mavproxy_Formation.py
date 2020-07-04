@@ -216,6 +216,10 @@ class Formation(mp_module.MPModule):
                 if  self._lcm and self._sub_cmd:
                     self._lcm.unsubscribe(self._sub_cmd)
                     self._sub_cmd=None
+                
+                if self._handle_thread!=None:
+                    self._handle_thread.exit()
+                    self._handle_thread=None
             else:
                 self._is_leader=False
                 if self._lcm and not self._sub_pos:
