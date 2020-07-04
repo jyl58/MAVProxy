@@ -217,18 +217,16 @@ class Formation(mp_module.MPModule):
                     self._lcm.unsubscribe(self._sub_cmd)
                     self._sub_cmd=None
                 
-                if self._handle_thread!=None:
-                    self._handle_thread.exit()
-                    self._handle_thread=None
             else:
                 self._is_leader=False
                 if self._lcm and not self._sub_pos:
                     print("Sub the formation's topic")
                     self._sub_pos=self._lcm.subscribe("Leader_Pos", self.handleLeaderPos)
                     self._sub_cmd=self._lcm.subscribe("Command", self.handleCommand)
-                    self._handle_thread = threading.Thread(target=self.lcmHandleThread)
-                    self._handle_thread.daemon = True
-                    self._handle_thread.start()
+                    if self._handle_thread==None:
+                        self._handle_thread = threading.Thread(target=self.lcmHandleThread)
+                        self._handle_thread.daemon = True
+                        self._handle_thread.start()
             '''pub link msg to qgc'''
             if self._lcm:
                 state=status_t()
