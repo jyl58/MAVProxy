@@ -346,9 +346,10 @@ class Formation(mp_module.MPModule):
 
 
     def idle_task(self):
-        if self.get_mav_param("SC_LEADER_ID")!=None and int(self.get_mav_param("SC_LEADER_ID"))!=self._leader_id:
-            self._leader_id=int(self.get_mav_param("SC_LEADER_ID"))
-            print("change leader to id: "+str(self._leader_id))
+        formation_leader_id=self.get_mav_param("FOR_LEADER_ID")
+        if formation_leader_id!=None and int(formation_leader_id)!=self._leader_id:
+            self._leader_id=int(formation_leader_id)
+            print("change leader id to: "+str(self._leader_id))
         if self._lcm==None:
             ip=os.popen('hostname -I').read().splitlines()[0]
             if len(ip)>0:
